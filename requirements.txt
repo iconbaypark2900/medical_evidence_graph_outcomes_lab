@@ -1,0 +1,68 @@
+# Core dependencies
+numpy>=1.21.0
+pandas>=1.3.0
+asyncio-mqtt>=0.11.0
+
+# Medical/Healthcare Libraries
+lifelines>=0.27.0  # For survival analysis
+dowhy>=0.9.0       # For causal inference (if included)
+econml>=0.14.0     # For uplift modeling (if included)
+
+# Graph Database
+neo4j>=5.0.0
+
+# Search and Vector Databases
+opensearch-py>=2.2.0
+qdrant-client>=1.1.4
+
+# Machine Learning Libraries
+torch>=1.12.0
+scikit-learn>=1.1.0
+
+# NLP and Text Processing
+sentence-transformers>=2.2.0
+transformers>=4.20.0
+spacy>=3.4.0
+nltk>=3.7
+
+# Data Processing
+pyarrow>=8.0.0
+polars>=0.18.0
+
+# API & Web Framework
+fastapi>=0.85.0
+uvicorn>=0.18.0
+httpx>=0.23.0
+
+# Configuration & Logging
+pydantic>=1.10.0
+python-dotenv>=0.19.0
+structlog>=22.1.0
+
+# Visualization
+matplotlib>=3.5.0
+seaborn>=0.11.0
+plotly>=5.0.0
+
+# Network Analysis
+networkx>=2.8.0
+
+# Security & Privacy
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.0
+# microsoft-presidio>=2.2.0  # For PHI detection (commented out due to installation issues)
+
+# Testing
+pytest>=7.0.0
+pytest-asyncio>=0.19.0
+
+# Observability
+mlflow>=2.0.0
+langfuse>=1.0.0
+prometheus-client>=0.15.0
+
+# Utilities
+pydantic-settings>=2.0.0
+python-multipart>=0.0.6
+aiohttp>=3.8.0
+requests>=2.28.0

@@ -1,0 +1,78 @@
+{
+},
+{
+"name": "outcomes_analytics_service",
+"responsibilities": [
+"Support cohort definitions and outcome metrics",
+"Run survival and comparative effectiveness analyses",
+"Version and expose results for review"
+]
+},
+{
+"name": "pathway_guideline_service",
+"responsibilities": [
+"Represent guidelines as machine-readable pathways",
+"Compare observed care vs recommended pathways",
+"Highlight optimization and update opportunities"
+]
+}
+],
+"workflows": [
+{
+"id": "evidence_ingestion_pipeline",
+"triggers": ["cron", "manual"],
+"steps": [
+"fetch_sources",
+"parse_normalize",
+"map_ontologies",
+"store_metadata",
+"emit_evidence_ingested"
+]
+},
+{
+"id": "evidence_graph_update",
+"triggers": ["event:evidence.ingested"],
+"steps": [
+"extract_entities_relations",
+"upsert_graph_nodes_edges",
+"recompute_kge_features"
+]
+},
+{
+"id": "graph_rag_query",
+"triggers": ["api_call"],
+"steps": [
+"analyze_query",
+"run_bm25_search",
+"run_vector_search",
+"run_graph_traversal",
+"merge_rerank_results",
+"attach_citations"
+]
+},
+{
+"id": "cohort_outcomes_analysis",
+"triggers": ["api_call"],
+"steps": [
+"load_cohort_definition",
+"extract_population_data",
+"run_survival_or_effectiveness_models",
+"store_and_return_metrics"
+]
+}
+],
+"security": {
+"auth": "oidc_sso",
+"policy_engine": "opa",
+"secret_management": "vault",
+"phi_detection": "presidio",
+"deployment_modes": ["single_tenant", "vpc", "on_prem"]
+},
+"non_functional": {
+"explainability_by_design": true,
+"scalability": "graph_and_index_clusters",
+"auditability": true,
+"regulatory_alignment_configurable": true
+}
+}
+}

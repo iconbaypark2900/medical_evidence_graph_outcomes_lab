@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Responsibility>Emit ingestion events</Responsibility>
+</Service>
+<Service name="evidence_graph_service">
+<Responsibility>Maintain the medical evidence graph in Neo4j</Responsibility>
+<Responsibility>Run KGE/GNN models for link suggestions</Responsibility>
+</Service>
+<Service name="graph_rag_service">
+<Responsibility>Index documents into OpenSearch and Qdrant</Responsibility>
+<Responsibility>Serve hybrid BM25 + vector + graph retrieval</Responsibility>
+<Responsibility>Return answers with citations and graph context</Responsibility>
+</Service>
+<Service name="outcomes_analytics_service">
+<Responsibility>Support cohort definitions and outcome calculations</Responsibility>
+<Responsibility>Run survival and comparative effectiveness analyses</Responsibility>
+</Service>
+<Service name="pathway_guideline_service">
+<Responsibility>Model guidelines and pathways as machine-readable graphs</Responsibility>
+<Responsibility>Compare observed care to recommended pathways</Responsibility>
+<Responsibility>Highlight optimization opportunities</Responsibility>
+</Service>
+</Services>
+
+
+<Workflows>
+<Workflow id="evidence_ingestion_pipeline">
+<Trigger>cron</Trigger>
+<Trigger>manual</Trigger>
+<Step>fetch_sources</Step>
+<Step>parse_normalize</Step>
+<Step>map_ontologies</Step>
+<Step>store_metadata</Step>
+<Step>emit_evidence_ingested</Step>
+</Workflow>
+<Workflow id="evidence_graph_update">
+<Trigger>event:evidence.ingested</Trigger>
+<Step>extract_entities_relations</Step>
+<Step>upsert_graph_nodes_edges</Step>
+<Step>recompute_kge_features</Step>
+</Workflow>
+<Workflow id="graph_rag_query">
+<Trigger>api_call</Trigger>
+<Step>analyze_query</Step>
+<Step>run_bm25_search</Step>
+<Step>run_vector_search</Step>
+<Step>run_graph_traversal</Step>
+<Step>merge_rerank_results</Step>
+<Step>attach_citations</Step>
+</Workflow>
+<Workflow id="cohort_outcomes_analysis">
+<Trigger>api_call</Trigger>
+<Step>load_cohort_definition</Step>
+<Step>extract_population_data</Step>
+<Step>run_survival_or_effectiveness_models</Step>
+<Step>store_and_return_metrics</Step>
+</Workflow>
+</Workflows>
+
+
+<Security>
+<Auth>oidc_sso</Auth>
+<PolicyEngine>opa</PolicyEngine>
+<SecretManagement>vault</SecretManagement>
+<PhiDetection>presidio</PhiDetection>
+<DeploymentModes>single_tenant_vpc_on_prem</DeploymentModes>
+</Security>
+
+
+<NonFunctional>
+<ExplainabilityByDesign>true</ExplainabilityByDesign>
+<Scalability>graph_and_index_clusters</Scalability>
+<Auditability>true</Auditability>
+<RegulatoryAlignmentConfigurable>true</RegulatoryAlignmentConfigurable>
+</NonFunctional>
+</Project>

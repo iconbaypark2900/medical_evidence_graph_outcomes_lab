@@ -1,0 +1,70 @@
+{
+    "services": {
+        "evidence_ingestion_service": {
+            "enabled": true,
+            "schedule": "0 2 * * *",
+            "data_sources": ["pubmed", "clinicaltrials", "guidelines"]
+        },
+        "evidence_graph_service": {
+            "enabled": true,
+            "graph_database": {
+                "uri": "bolt://localhost:7687",
+                "username": "neo4j",
+                "password": "password"
+            },
+            "models": {
+                "kge_model": "transE",
+                "kge_dimensions": 128
+            }
+        },
+        "graph_rag_service": {
+            "enabled": true,
+            "opensearch": {
+                "host": "localhost",
+                "port": 9200
+            },
+            "qdrant": {
+                "host": "localhost",
+                "port": 6333
+            },
+            "neo4j": {
+                "uri": "bolt://localhost:7687",
+                "username": "neo4j",
+                "password": "password"
+            }
+        },
+        "outcomes_analytics_service": {
+            "enabled": true,
+            "max_cohort_size": 100000,
+            "survival_analysis_methods": ["kaplan_meier", "cox_regression"]
+        },
+        "pathway_guideline_service": {
+            "enabled": true,
+            "guideline_sources": ["ada", "aha", "nccn"],
+            "update_frequency": "monthly"
+        }
+    },
+    "security": {
+        "auth": {
+            "type": "oidc_sso",
+            "issuer": "https://your-identity-provider.com",
+            "client_id": "your-client-id"
+        },
+        "opa": {
+            "url": "http://localhost:8181"
+        },
+        "vault": {
+            "url": "http://localhost:8200"
+        },
+        "presidio": {
+            "enabled": true,
+            "analyze_timeout": 5000
+        }
+    },
+    "observability": {
+        "mlflow_tracking_uri": "http://localhost:5000",
+        "langfuse_secret_key": "",
+        "langfuse_public_key": "",
+        "prometheus_endpoint": "http://localhost:9090"
+    }
+}
