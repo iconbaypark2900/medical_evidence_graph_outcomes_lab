@@ -1,0 +1,32 @@
+project:
+  name: medical_evidence_graph_outcomes_lab
+  machine: dgx_spark
+  local_path: /home/iconbaypark2900/dataScience/medical_evidence_graph_outcomes_lab
+  origin: git@github.com:iconbaypark2900/medical_evidence_graph_outcomes_lab.git
+  branch: main
+  category: data_science
+  portfolio_status: active
+  maturity_phase: prototype
+  task_phase: intake
+runtime:
+  gpu_required: false
+  runtime_type: python
+  stack:
+  - python
+validation:
+  commands:
+  - cd ~/dataScience/medical_evidence_graph_outcomes_lab && python -m pytest 2>/dev/null
+    || liaison doctor
+risks:
+- biomedical
+- no-real-patient-data
+- evidence-provenance
+liaison:
+  recommended_agents:
+  - hermes
+  - ml-intern
+  patterns:
+  - python-cli
+next_actions:
+- Add test suite and pyproject.toml
+- Confirm only synthetic/public evidence datasets in repo

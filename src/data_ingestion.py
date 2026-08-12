@@ -72,8 +72,13 @@ class PubMedFetcher:
                     logger.error(f"PubMed search failed with status {response.status}")
                     return []
         except Exception as e:
+            # An empty list means "this query matched no articles", which is a
+            # real and common answer. Returning it on a network or API failure
+            # makes a broken ingest indistinguishable from an exhaustive search
+            # that found nothing — and the second silently under-populates the
+            # evidence graph everything downstream reasons over.
             logger.error(f"Error searching PubMed: {e}")
-            return []
+            raise RuntimeError(f"PubMed search failed for {query!r}: {e}") from e
     
     async def fetch_pubmed_articles(self, pmids: List[str]) -> List[Dict[str, Any]]:
         """Fetch full article details from PubMed"""
@@ -128,7 +133,8 @@ class PubMedFetcher:
                     return []
         except Exception as e:
             logger.error(f"Error fetching PubMed articles: {e}")
-            return []
+            raise RuntimeError(
+                f"PubMed fetch failed for {len(pmids)} pmids: {e}") from e
 
 
 class ClinicalTrialsFetcher:
@@ -167,7 +173,7 @@ class ClinicalTrialsFetcher:
                     return []
         except Exception as e:
             logger.error(f"Error searching ClinicalTrials.gov: {e}")
-            return []
+            raise RuntimeError(f"ClinicalTrials.gov search failed: {e}") from e
 
 
 async def ingest_medical_evidence(search_terms: List[str], max_per_source: int = 5) -> List[MedicalEvidence]:

@@ -60,8 +60,15 @@ class SurvivalAnalysisModels:
             
             return time_points.tolist(), survival_probs.tolist()
         except Exception as e:
+            # Do NOT return ([], []) here. A caller cannot distinguish "the fit
+            # failed" from "this cohort has no events", and the second is a
+            # clinical finding while the first is a bug. An empty survival curve
+            # renders as a blank chart, which reads as a result rather than an
+            # error.
             logger.error(f"Error in Kaplan-Meier analysis: {e}")
-            return [], []
+            raise RuntimeError(
+                f"Kaplan-Meier fit failed on {len(duration)} observations: {e}"
+            ) from e
     
     def cox_regression_analysis(self, data: pd.DataFrame, duration_col: str, event_col: str, 
                                covariate_cols: List[str]) -> SurvivalAnalysisResult:
@@ -71,17 +78,15 @@ class SurvivalAnalysisModels:
             required_cols = [duration_col, event_col] + covariate_cols
             missing_cols = [col for col in required_cols if col not in data.columns]
             if missing_cols:
+                # Do NOT return an empty SurvivalAnalysisResult. A result object
+                # with no hazard ratios and c_index=0.0 is indistinguishable from
+                # a model that genuinely found no predictive signal — and 0.5 is
+                # the c-index of a coin flip, so 0.0 is not even a neutral value
+                # to fabricate. A missing column is a caller error; say so.
                 logger.error(f"Missing columns for Cox regression: {missing_cols}")
-                return SurvivalAnalysisResult(
-                    hazard_ratios={},
-                    p_values={},
-                    confidence_intervals={},
-                    c_index=0.0,
-                    log_likelihood=0.0,
-                    baseline_survival=[],
-                    time_points=[],
-                    survival_probabilities=[]
-                )
+                raise KeyError(
+                    f"Cox regression requires columns {missing_cols}, which are "
+                    f"not in the supplied data (has: {list(data.columns)})")
             
             model_data = data[required_cols].copy().dropna()
             
@@ -161,20 +166,15 @@ class SurvivalAnalysisModels:
             return result
             
         except Exception as e:
+            # A SurvivalAnalysisResult with no hazard ratios and c_index=0.0 is
+            # not an empty result — it is a claim: "no covariate predicts
+            # survival, and the model discriminates worse than a coin flip"
+            # (a c-index of 0.5 is chance; 0.0 is perfectly inverted). Returning
+            # that because the fit crashed turns a bug into a clinical finding.
             logger.error(f"Error in Cox regression analysis: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            # Return empty result
-            return SurvivalAnalysisResult(
-                hazard_ratios={},
-                p_values={},
-                confidence_intervals={},
-                c_index=0.0,
-                log_likelihood=0.0,
-                baseline_survival=[],
-                time_points=[],
-                survival_probabilities=[]
-            )
+            raise RuntimeError(
+                f"Cox regression failed on {len(data)} rows with covariates "
+                f"{covariate_cols}: {e}") from e
 
 
 class CausalInferenceModels:
@@ -229,8 +229,11 @@ class CausalInferenceModels:
             return np.array(all_matched), matched_treatment
             
         except Exception as e:
+            # Returning empty arrays reads downstream as "no units could be
+            # matched", a legitimate result of poor covariate overlap, rather
+            # than as "the matching code failed".
             logger.error(f"Error in propensity score matching: {e}")
-            return np.array([]), np.array([])
+            raise RuntimeError(f"Propensity score matching failed: {e}") from e
     
     def estimate_ate(self, X: pd.DataFrame, treatment: np.ndarray, outcome: np.ndarray, 
                     covariates: List[str]) -> Dict[str, float]:
@@ -275,8 +278,14 @@ class CausalInferenceModels:
             return results
             
         except Exception as e:
+            # The most dangerous return in this module. An average treatment
+            # effect of 0.0 is not a neutral placeholder — it is the assertion
+            # "this treatment does nothing", which is a substantive clinical
+            # claim and one of the two most consequential answers this function
+            # can give. Reporting it because the estimator crashed inverts the
+            # meaning of a failure into a finding.
             logger.error(f"Error in ATE estimation: {e}")
-            return {'ate_simple': 0.0, 'ate_matched': 0.0, 'ate_regression': 0.0}
+            raise RuntimeError(f"ATE estimation failed: {e}") from e
 
 
 class EnhancedOutcomeModels:
