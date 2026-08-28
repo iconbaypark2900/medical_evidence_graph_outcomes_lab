@@ -20,7 +20,11 @@ reports that it is not ready (503).
 import asyncio
 from dataclasses import dataclass, field
 
-from fastapi import FastAPI, HTTPException, Depends, Query
+import os
+import secrets
+
+from fastapi import FastAPI, HTTPException, Depends, Query, Security
+from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Any, List, Dict, Optional
@@ -30,6 +34,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 import json
 from enum import Enum
+from pathlib import Path
 import logging
 
 from scipy import stats
@@ -56,12 +61,86 @@ app = FastAPI(
     version="2.0.0"
 )
 
+# ---------------------------------------------------------------------------
+# Authentication
+#
+# There was none, and CORS was allow_origins=["*"] with credentials, which
+# lets any page on the internet make authenticated requests on a viewer's
+# behalf. This is patient-facing analysis; it should not be reachable by
+# anything that can reach the port.
+#
+# Keys come from MEG_API_KEYS (comma-separated) or config's
+# security.api_keys. When none are configured the API still runs -- the
+# alternative is being unable to develop against it -- but it is loud
+# about it: a warning at startup, and /api/health reports authentication
+# as disabled rather than staying silent about it.
+# ---------------------------------------------------------------------------
+
+def load_api_keys(config_path: str = "config/settings.json") -> set:
+    """Configured API keys, environment first."""
+    from_env = os.environ.get("MEG_API_KEYS", "")
+    keys = {k.strip() for k in from_env.split(",") if k.strip()}
+    if keys:
+        return keys
+
+    try:
+        config = json.loads(Path(config_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        return set()
+    return {k for k in config.get("security", {}).get("api_keys", []) if k}
+
+
+def load_allowed_origins(config_path: str = "config/settings.json") -> List[str]:
+    from_env = os.environ.get("MEG_ALLOWED_ORIGINS", "")
+    origins = [o.strip() for o in from_env.split(",") if o.strip()]
+    if origins:
+        return origins
+
+    try:
+        config = json.loads(Path(config_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        config = {}
+    configured = config.get("security", {}).get("allowed_origins")
+    # The Streamlit frontend, and nothing else, by default.
+    return configured or ["http://localhost:8501", "http://127.0.0.1:8501"]
+
+
+API_KEYS = load_api_keys()
+ALLOWED_ORIGINS = load_allowed_origins()
+
+if not API_KEYS:
+    logger.warning(
+        "No API keys configured: every endpoint is open to anyone who can "
+        "reach this port. Set MEG_API_KEYS or security.api_keys before "
+        "exposing this beyond localhost.")
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def require_api_key(api_key: str = Security(api_key_header)) -> Optional[str]:
+    """Reject a request that carries no valid key, when keys are configured."""
+    if not API_KEYS:
+        return None
+
+    # Constant-time comparison against each key: a plain `in` on a set
+    # leaks nothing useful here, but comparing the supplied value is where
+    # timing differences would show.
+    if api_key and any(secrets.compare_digest(api_key, k) for k in API_KEYS):
+        return api_key
+
+    raise HTTPException(
+        status_code=401,
+        detail="A valid X-API-Key header is required.",
+        headers={"WWW-Authenticate": "APIKey"},
+    )
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact origins
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
 
 
@@ -497,6 +576,9 @@ async def health_check():
             "risk_assessment": risk_model_registry.is_ready(),
         },
         "risk_model_version": risk_model_registry.version,
+        # Stated, not assumed. An unauthenticated deployment should be
+        # visible to whoever is looking at it.
+        "authentication": "api_key" if API_KEYS else "disabled",
     }
 
 
@@ -505,7 +587,7 @@ async def health_check():
 # ---------------------------------------------------------------------------
 
 @app.post("/api/models/risk/train")
-async def train_risk_models(request: TrainRiskModelRequest):
+async def train_risk_models(request: TrainRiskModelRequest, _key: str = Depends(require_api_key)):
     """Fit risk models on labelled patients and report held-out performance.
 
     Splitting matters here: a random forest scored on its own training rows
@@ -593,7 +675,7 @@ async def train_risk_models(request: TrainRiskModelRequest):
 
 
 @app.post("/api/patients/risk-assessment")
-async def assess_patient_risk(patients: List[PatientInput]):
+async def assess_patient_risk(patients: List[PatientInput], _key: str = Depends(require_api_key)):
     """Score patients with the currently registered risk models."""
     if not patients:
         raise HTTPException(status_code=422, detail="No patients supplied")
@@ -649,7 +731,7 @@ async def assess_patient_risk(patients: List[PatientInput]):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/survival-analysis/kaplan-meier")
-async def kaplan_meier_analysis(request: SurvivalAnalysisRequest):
+async def kaplan_meier_analysis(request: SurvivalAnalysisRequest, _key: str = Depends(require_api_key)):
     """Kaplan-Meier estimate from the supplied follow-up.
 
     Both inputs come from `follow_up` on each patient. The endpoint
@@ -697,7 +779,7 @@ async def kaplan_meier_analysis(request: SurvivalAnalysisRequest):
 
 
 @app.post("/api/survival-analysis/cox-regression")
-async def cox_regression_analysis(request: SurvivalAnalysisRequest):
+async def cox_regression_analysis(request: SurvivalAnalysisRequest, _key: str = Depends(require_api_key)):
     """Cox proportional hazards on the supplied covariates and follow-up.
 
     The covariates were always real; the outcome was not. `observed_time`
@@ -752,7 +834,7 @@ async def cox_regression_analysis(request: SurvivalAnalysisRequest):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/causal-inference/ate-estimation")
-async def estimate_ate(request: CausalAnalysisRequest):
+async def estimate_ate(request: CausalAnalysisRequest, _key: str = Depends(require_api_key)):
     """Average treatment effect from observed assignments and outcomes.
 
     Treatment and outcome now come from the request. They were previously
@@ -891,7 +973,7 @@ def summarise_cohort(members: List[CohortMember]) -> Dict[str, Any]:
 
 
 @app.post("/api/cohorts/compare")
-async def compare_cohorts(request: CohortAnalysisRequest):
+async def compare_cohorts(request: CohortAnalysisRequest, _key: str = Depends(require_api_key)):
     """Compare two cohorts on their observed outcomes, with real tests."""
     if not request.comparator_cohort:
         raise HTTPException(
@@ -962,6 +1044,7 @@ async def search_evidence(
     limit: int = Query(10, ge=1, le=100, description="Number of results to return"),
     filters: str = Query('{}', description="JSON filters for search"),
     searcher: EvidenceSearcher = Depends(get_evidence_searcher),
+    _key: str = Depends(require_api_key),
 ):
     """Search published evidence.
 

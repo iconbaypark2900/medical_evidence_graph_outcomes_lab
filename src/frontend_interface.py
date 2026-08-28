@@ -17,6 +17,7 @@ the size of the difference and told the reader the result was
 available, this page now says so and asks for it.
 """
 import json
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -61,8 +62,9 @@ def call_api(method: str, path: str, **kwargs) -> Optional[Dict[str, Any]]:
     for a genuinely empty result.
     """
     url = f"{st.session_state.api_url}{path}"
+    headers = {**kwargs.pop("headers", {}), **_auth_headers()}
     try:
-        response = requests.request(method, url, timeout=60, **kwargs)
+        response = requests.request(method, url, timeout=60, headers=headers, **kwargs)
     except requests.RequestException as exc:
         st.error(f"Could not reach the API at {url}: {exc}")
         return None
@@ -78,9 +80,17 @@ def call_api(method: str, path: str, **kwargs) -> Optional[Dict[str, Any]]:
     return response.json()
 
 
+def _auth_headers() -> Dict[str, str]:
+    """API key from the environment, if the API requires one."""
+    key = os.environ.get("MEG_API_KEY", "")
+    return {"X-API-Key": key} if key else {}
+
+
 def fetch_health() -> Optional[Dict[str, Any]]:
     try:
-        response = requests.get(f"{st.session_state.api_url}/api/health", timeout=5)
+        response = requests.get(
+            f"{st.session_state.api_url}/api/health", timeout=5,
+            headers=_auth_headers())
         return response.json() if response.status_code == 200 else None
     except requests.RequestException:
         return None
@@ -310,6 +320,12 @@ def page_dashboard():
     col1.metric("Survival analysis", "ready" if ready["survival_analysis"] else "not ready")
     col2.metric("Causal inference", "ready" if ready["causal_inference"] else "not ready")
     col3.metric("Risk assessment", "ready" if ready["risk_assessment"] else "not trained")
+
+    if health.get("authentication") == "disabled":
+        st.warning(
+            "This API has no authentication configured. Anyone who can reach "
+            "its port can run analyses and read the corpus."
+        )
 
     if health["risk_model_version"]:
         st.success(f"Risk model version `{health['risk_model_version']}`")

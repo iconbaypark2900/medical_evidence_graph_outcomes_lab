@@ -890,3 +890,116 @@ async def test_the_searcher_degrades_to_live_when_the_stack_is_down(monkeypatch)
     searcher = await backend.build_evidence_searcher()
 
     assert isinstance(searcher, backend.LiteratureEvidenceSearcher)
+
+
+# --------------------------------------------------------------------------
+# Authentication
+#
+# There was none, and CORS was allow_origins=["*"] with credentials, which
+# lets any page on the internet make authenticated requests on a viewer's
+# behalf against a patient-analysis API.
+# --------------------------------------------------------------------------
+
+import src.api_backend as backend
+
+
+@pytest.fixture
+def keyed_client(monkeypatch):
+    """A client against an API with keys configured."""
+    monkeypatch.setattr(backend, "API_KEYS", {"secret-key-one", "secret-key-two"})
+    return TestClient(app)
+
+
+def test_health_states_whether_authentication_is_on(client):
+    """An unauthenticated deployment should be visible to whoever looks."""
+    assert client.get("/api/health").json()["authentication"] == "disabled"
+
+
+def test_health_states_when_authentication_is_on(keyed_client):
+    assert keyed_client.get("/api/health").json()["authentication"] == "api_key"
+
+
+def test_an_analysis_endpoint_rejects_a_request_with_no_key(keyed_client):
+    response = keyed_client.post(
+        "/api/survival-analysis/kaplan-meier",
+        json={"patient_data": [record(i) for i in range(3)]})
+
+    assert response.status_code == 401
+    assert "X-API-Key" in response.json()["detail"]
+
+
+def test_an_analysis_endpoint_rejects_a_wrong_key(keyed_client):
+    response = keyed_client.post(
+        "/api/survival-analysis/kaplan-meier",
+        json={"patient_data": [record(i) for i in range(3)]},
+        headers={"X-API-Key": "not-a-real-key"})
+
+    assert response.status_code == 401
+
+
+def test_a_valid_key_is_accepted(keyed_client):
+    response = keyed_client.post(
+        "/api/survival-analysis/kaplan-meier",
+        json={"patient_data": [record(i, days=10.0 * (i + 1)) for i in range(3)]},
+        headers={"X-API-Key": "secret-key-one"})
+
+    assert response.status_code == 200
+
+
+def test_every_analysis_endpoint_is_protected(keyed_client):
+    """A single unprotected analysis route defeats the whole thing."""
+    unprotected = []
+    for method, path, payload in [
+        ("post", "/api/models/risk/train", {"training_data": labelled_cohort(20)}),
+        ("post", "/api/patients/risk-assessment", [patient(0)]),
+        ("post", "/api/survival-analysis/kaplan-meier", {"patient_data": [record(0), record(1)]}),
+        ("post", "/api/survival-analysis/cox-regression", {"patient_data": [record(0), record(1)]}),
+        ("post", "/api/causal-inference/ate-estimation", ate_payload(n=8)),
+        ("post", "/api/cohorts/compare",
+         {"patient_cohort": [member(i, {"m": 0.0}) for i in range(2)],
+          "comparator_cohort": [member(i, {"m": 1.0}) for i in range(2)]}),
+    ]:
+        if getattr(keyed_client, method)(path, json=payload).status_code != 401:
+            unprotected.append(path)
+
+    assert unprotected == [], f"reachable without a key: {unprotected}"
+
+
+def test_evidence_search_is_protected(keyed_client, stub_searcher):
+    assert keyed_client.get(
+        "/api/evidence/search", params={"query": "hf"}).status_code == 401
+    assert keyed_client.get(
+        "/api/evidence/search", params={"query": "hf"},
+        headers={"X-API-Key": "secret-key-two"}).status_code == 200
+
+
+def test_health_and_root_stay_open_for_probes(keyed_client):
+    """A load balancer cannot present a key."""
+    assert keyed_client.get("/api/health").status_code == 200
+    assert keyed_client.get("/health").status_code == 200
+    assert keyed_client.get("/").status_code == 200
+
+
+def test_cors_no_longer_allows_every_origin():
+    """allow_origins=["*"] with allow_credentials lets any page on the
+    internet make authenticated requests on a viewer's behalf."""
+    assert "*" not in backend.ALLOWED_ORIGINS
+    assert backend.ALLOWED_ORIGINS
+
+
+def test_api_keys_are_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("MEG_API_KEYS", " key-a , key-b ,, ")
+
+    assert backend.load_api_keys() == {"key-a", "key-b"}
+
+
+def test_allowed_origins_are_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("MEG_ALLOWED_ORIGINS", "https://clinic.example")
+
+    assert backend.load_allowed_origins() == ["https://clinic.example"]
+
+
+def test_a_missing_config_file_does_not_silently_grant_access(tmp_path):
+    """An unreadable config must yield no keys, not an empty allowlist that
+    happens to authorise everything."""
+    assert backend.load_api_keys(str(tmp_path / "nope.json")) == set()

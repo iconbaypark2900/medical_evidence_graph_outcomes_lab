@@ -70,7 +70,13 @@
         "presidio": {
             "enabled": true,
             "analyze_timeout": 5000
-        }
+        },
+        "api_keys": [],
+        "allowed_origins": [
+            "http://localhost:8501",
+            "http://127.0.0.1:8501"
+        ],
+        "_note": "api_keys empty means the API is unauthenticated. Set MEG_API_KEYS (comma-separated) or fill this list before exposing it beyond localhost."
     },
     "observability": {
         "mlflow_tracking_uri": "http://localhost:5000",

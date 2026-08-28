@@ -71,6 +71,7 @@ The Medical Evidence Graph & Outcomes Insight Lab is a sophisticated platform de
 | Graph-RAG hybrid retrieval | working — BM25 + vector + graph traversal, fused, with citations |
 | Evidence search API + frontend | working — served from the index, with a labelled live fallback |
 | Pathway & guideline service | working — adherence against a guideline, with tests |
+| API authentication | API key + restricted CORS; OIDC/OPA still not integrated |
 | Vault / OPA / Presidio / MLflow / Langfuse | not integrated |
 
 ## Setup
@@ -116,6 +117,27 @@ risk models and the frontend need no backing stores.
 ```
 
 Interactive docs at `http://localhost:8000/docs`.
+
+### Authentication
+
+```bash
+MEG_API_KEYS="a-long-random-key" .venv/bin/python -m uvicorn src.api_backend:app --port 8000
+MEG_API_KEY="a-long-random-key"  .venv/bin/python -m streamlit run src/frontend_interface.py
+```
+
+Every analysis endpoint requires `X-API-Key`; `/`, `/health` and
+`/api/health` stay open so a load balancer can probe them. Keys come from
+`MEG_API_KEYS` (comma-separated) or `security.api_keys` in the config.
+
+With no keys configured the API still runs — you have to be able to
+develop against it — but it says so: a warning at startup, a banner in
+the frontend, and `"authentication": "disabled"` in the health payload.
+It is unauthenticated, not silently unauthenticated.
+
+CORS is restricted to `security.allowed_origins` (or `MEG_ALLOWED_ORIGINS`),
+defaulting to the local Streamlit frontend. It was previously `["*"]` with
+credentials allowed, which lets any page on the internet make
+authenticated requests on a viewer's behalf.
 
 | Endpoint | Purpose |
 |---|---|
