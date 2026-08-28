@@ -30,10 +30,9 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
-import neo4j
-from opensearchpy import OpenSearch
-from qdrant_client import QdrantClient
-
+# The database clients live in the optional `graph` extra and are imported
+# inside connect(). Rank fusion and the result types above are pure logic
+# and stay importable without them.
 from src.integration import (
     EMBEDDING_MODEL,
     EVIDENCE_COLLECTION,
@@ -171,12 +170,21 @@ class GraphRAGService:
         self.db_config = load_database_config(config_path)
         self.index_name = index_name
         self.collection_name = collection_name
-        self.opensearch_client: Optional[OpenSearch] = None
-        self.qdrant_client: Optional[QdrantClient] = None
-        self.neo4j_driver: Optional[neo4j.AsyncDriver] = None
+        self.opensearch_client: Optional[Any] = None
+        self.qdrant_client: Optional[Any] = None
+        self.neo4j_driver: Optional[Any] = None
         self.embedding_model = embedding_model
 
     async def connect(self) -> None:
+        try:
+            import neo4j
+            from opensearchpy import OpenSearch
+            from qdrant_client import QdrantClient
+        except ImportError as e:
+            raise RetrievalError(
+                f"The graph stack is an optional extra and is not installed: "
+                f"{e}. Install it with `pip install -e '.[graph]'`.") from e
+
         opensearch_config = self.db_config["opensearch"]
         host = opensearch_config.get("host", "localhost")
         port = opensearch_config.get("port", 9200)

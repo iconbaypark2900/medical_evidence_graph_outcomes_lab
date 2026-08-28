@@ -234,10 +234,30 @@ def _probe(url: str, timeout: float = 1.5) -> bool:
         return False
 
 
+def _graph_extra_installed() -> bool:
+    """Whether the optional `graph` dependencies are importable."""
+    import importlib.util
+
+    return all(
+        importlib.util.find_spec(module) is not None
+        for module in ("neo4j", "opensearchpy", "qdrant_client", "sentence_transformers")
+    )
+
+
 @pytest.fixture(scope="session")
 def stack_available() -> bool:
+    """Both halves are required, and both are genuinely separable.
+
+    Reachable services are not enough: a machine can have the containers
+    up while the venv lacks the optional `graph` extra, and the fixtures
+    below then fail at import rather than skipping. Checking only the
+    ports made that combination an error instead of a skip.
+    """
     import json
     import pathlib as _pathlib
+
+    if not _graph_extra_installed():
+        return False
 
     config = json.loads(_pathlib.Path("config/settings.json").read_text())
     rag = config["services"]["graph_rag_service"]
@@ -254,5 +274,9 @@ def stack_available() -> bool:
 @pytest.fixture
 def require_stack(stack_available):
     if not stack_available:
+        if not _graph_extra_installed():
+            pytest.skip(
+                "the optional graph extra is not installed; "
+                "`pip install -e '.[graph]'`")
         pytest.skip(
             "Neo4j/OpenSearch/Qdrant not reachable; run `docker compose up -d`")

@@ -29,12 +29,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import neo4j
-from opensearchpy import OpenSearch
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
-
 from src.data_ingestion import MedicalEvidence
+
+# neo4j / opensearch-py / qdrant-client are the optional `graph` extra and
+# are imported inside connect(), not here. Everything else in this module --
+# the document shape, the point-id derivation, the config loader -- is pure
+# and must stay importable (and testable) without a database driver
+# installed. Importing them at module scope made the whole test suite
+# require the extra.
 
 
 logging.basicConfig(level=logging.INFO)
@@ -117,9 +119,9 @@ class EvidenceStore:
                  index_name: str = EVIDENCE_INDEX,
                  collection_name: str = EVIDENCE_COLLECTION):
         self.db_config = load_database_config(config_path)
-        self.neo4j_driver: Optional[neo4j.AsyncDriver] = None
-        self.opensearch_client: Optional[OpenSearch] = None
-        self.qdrant_client: Optional[QdrantClient] = None
+        self.neo4j_driver: Optional[Any] = None
+        self.opensearch_client: Optional[Any] = None
+        self.qdrant_client: Optional[Any] = None
         # Injectable so tests can supply a stub instead of downloading a model.
         self.embedding_model = embedding_model
         # Overridable so tests can target their own index and collection.
@@ -137,6 +139,15 @@ class EvidenceStore:
         that is populated in some stores and not others, and retrieval
         cannot tell that apart from a document that does not exist.
         """
+        try:
+            import neo4j
+            from opensearchpy import OpenSearch
+            from qdrant_client import QdrantClient
+        except ImportError as e:
+            raise StorageError(
+                f"The graph stack is an optional extra and is not installed: "
+                f"{e}. Install it with `pip install -e '.[graph]'`.") from e
+
         neo4j_config = self.db_config["neo4j"]
         uri = neo4j_config.get("uri", "bolt://localhost:7687")
         try:
@@ -246,6 +257,8 @@ class EvidenceStore:
 
         existing = {c.name for c in self.qdrant_client.get_collections().collections}
         if self.collection_name not in existing:
+            from qdrant_client.models import Distance, VectorParams
+
             self.qdrant_client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(
@@ -345,6 +358,8 @@ class EvidenceStore:
         """Embed and upsert vectors for semantic retrieval."""
         if not evidence:
             return 0
+
+        from qdrant_client.models import PointStruct
 
         texts = [f"{e.title}\n\n{e.abstract}".strip() for e in evidence]
         vectors = self.embedding_model.encode(texts)
