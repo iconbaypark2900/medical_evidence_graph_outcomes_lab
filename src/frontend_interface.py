@@ -47,7 +47,9 @@ st.set_page_config(
 if 'api_connected' not in st.session_state:
     st.session_state.api_connected = False
 if 'api_url' not in st.session_state:
-    st.session_state.api_url = "http://localhost:8000"
+    # start_system.py passes this so the frontend follows the port the API
+    # was actually started on.
+    st.session_state.api_url = os.environ.get("MEG_API_URL", "http://localhost:8000")
 
 
 # ---------------------------------------------------------------------------

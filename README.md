@@ -161,7 +161,17 @@ Risk assessment additionally requires a model to have been trained, and
 returns each score together with that model's held-out performance and a
 list of any features that had to be imputed.
 
-### Frontend
+### Both together
+
+```bash
+.venv/bin/python start_system.py                    # loopback only
+MEG_API_KEYS="a-long-random-key" \
+  .venv/bin/python start_system.py --host 0.0.0.0   # needs keys, refuses without
+```
+
+Binding beyond `127.0.0.1` requires API keys and is refused without them.
+
+### Frontend alone
 
 ```bash
 .venv/bin/python -m streamlit run src/frontend_interface.py
