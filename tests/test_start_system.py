@@ -86,7 +86,14 @@ def test_the_frontend_is_launched_by_file_path(monkeypatch):
 
 
 def test_streamlit_rejects_a_module_target():
-    """Pins the actual reason the previous invocation could not work."""
+    """Pins the actual reason the previous invocation could not work.
+
+    Needs Streamlit itself, which is the optional `ui` extra -- the point
+    is what Streamlit does with the argument, so a stub would prove
+    nothing.
+    """
+    pytest.importorskip("streamlit", reason="the ui extra is not installed")
+
     result = subprocess.run(
         [sys.executable, "-m", "streamlit", "run", "src.frontend_interface:main"],
         capture_output=True, text=True, timeout=180)
