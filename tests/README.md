@@ -6,7 +6,21 @@
 .venv/bin/python -m pytest -m known_defect   # proven-but-unfixed bugs (currently none)
 ```
 
-No test here touches the network, Docker, or a database. `tests/conftest.py`
+Most tests here touch nothing external. The exceptions are marked
+`requires_stack` and need `docker compose up -d` (Neo4j, OpenSearch,
+Qdrant); they **skip** with an explanatory message when those are not
+reachable, so the default suite runs with nothing but a venv:
+
+```bash
+.venv/bin/python -m pytest -m requires_stack   # the 10 integration tests
+```
+
+Those ten are the ones that prove retrieval works against the real
+stores rather than against fakes — including that vector search matches a
+paraphrase sharing no words with the document, which the previous
+`np.random.rand(32)` "embeddings" could not do by construction.
+
+Otherwise, no test touches the network, Docker, or a database. `tests/conftest.py`
 drives the PubMed fetchers with a fake `aiohttp` session, and
 `test_api_backend.py` swaps the live evidence searcher out through a FastAPI
 dependency override.
@@ -33,6 +47,8 @@ suite has caught so far returned a perfectly plausible number.
 | `test_outcomes_analytics.py` | Cohort criteria, Kaplan-Meier, log-rank comparison, NNT |
 | `test_evidence_graph.py` | Stable entity ids, structural link suggestion, refusal to fake embeddings |
 | `test_evidence_ingestion.py` | The ingestion pipeline over an injected retrieval function |
+| `test_evidence_store.py` | Point identity, document shape, write-failure handling |
+| `test_graph_rag.py` | Rank fusion, each retriever, and hybrid answers end to end |
 
 ## The determinism guards
 

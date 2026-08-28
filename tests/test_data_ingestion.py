@@ -257,7 +257,7 @@ async def test_fetch_falls_back_to_medline_date(fake_session, fake_response):
 # --------------------------------------------------------------------------
 
 async def test_search_pubmed_raises_on_an_http_error_status(fake_session, fake_response):
-    fetcher = PubMedFetcher()
+    fetcher = PubMedFetcher(max_retries=0, min_interval=0)
     fetcher.session = fake_session(fake_response(429, payload={}))
 
     with pytest.raises(RuntimeError):
@@ -267,7 +267,7 @@ async def test_search_pubmed_raises_on_an_http_error_status(fake_session, fake_r
 async def test_fetch_pubmed_articles_raises_on_an_http_error_status(
     fake_session, fake_response
 ):
-    fetcher = PubMedFetcher()
+    fetcher = PubMedFetcher(max_retries=0, min_interval=0)
     fetcher.session = fake_session(fake_response(500, text=""))
 
     with pytest.raises(RuntimeError):
@@ -275,8 +275,84 @@ async def test_fetch_pubmed_articles_raises_on_an_http_error_status(
 
 
 async def test_search_trials_raises_on_an_http_error_status(fake_session, fake_response):
-    fetcher = ClinicalTrialsFetcher()
+    fetcher = ClinicalTrialsFetcher(max_retries=0, min_interval=0)
     fetcher.session = fake_session(fake_response(503, payload={}))
 
     with pytest.raises(RuntimeError):
         await fetcher.search_trials("atrial fibrillation")
+
+
+# --------------------------------------------------------------------------
+# Rate limiting and retry
+#
+# NCBI allows roughly 3 requests/second unauthenticated. Now that a 429
+# raises instead of returning [], an unpaced ingest fails outright rather
+# than silently under-populating -- which is better, but the right answer
+# is to not earn the 429.
+# --------------------------------------------------------------------------
+
+class SequenceSession:
+    """Returns a scripted sequence of responses, one per request."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+
+    def get(self, url, *args, **kwargs):
+        self.calls += 1
+        return self.responses.pop(0) if self.responses else self.responses[-1]
+
+
+async def test_a_rate_limited_search_is_retried_and_succeeds(fake_response):
+    fetcher = PubMedFetcher(max_retries=3, retry_backoff=0.001, min_interval=0)
+    fetcher.session = SequenceSession([
+        fake_response(429, payload={}),
+        fake_response(429, payload={}),
+        fake_response(200, payload={"esearchresult": {"idlist": ["1", "2"]}}),
+    ])
+
+    assert await fetcher.search_pubmed("heart failure") == ["1", "2"]
+    assert fetcher.session.calls == 3
+
+
+async def test_retries_are_bounded_and_then_it_raises(fake_response):
+    fetcher = PubMedFetcher(max_retries=2, retry_backoff=0.001, min_interval=0)
+    fetcher.session = SequenceSession([fake_response(429, payload={})] * 5)
+
+    with pytest.raises(RuntimeError, match="after 2 retries"):
+        await fetcher.search_pubmed("heart failure")
+
+    assert fetcher.session.calls == 3  # the first attempt plus two retries
+
+
+async def test_a_client_error_is_not_retried(fake_response):
+    """400 means the request is wrong; sending it again cannot help."""
+    fetcher = PubMedFetcher(max_retries=3, retry_backoff=0.001, min_interval=0)
+    fetcher.session = SequenceSession([fake_response(400, payload={})] * 5)
+
+    with pytest.raises(RuntimeError):
+        await fetcher.search_pubmed("heart failure")
+
+    assert fetcher.session.calls == 1
+
+
+async def test_requests_are_paced_to_the_minimum_interval(fake_response):
+    import time
+    fetcher = PubMedFetcher(min_interval=0.05)
+    fetcher.session = SequenceSession(
+        [fake_response(200, payload={"esearchresult": {"idlist": []}})] * 4)
+
+    start = time.monotonic()
+    for _ in range(3):
+        await fetcher.search_pubmed("heart failure")
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= 0.10, f"three requests took {elapsed:.3f}s; not paced"
+
+
+def test_clinical_trials_fetcher_inherits_the_pacing_behaviour():
+    fetcher = ClinicalTrialsFetcher()
+
+    assert fetcher.max_retries == 3
+    assert fetcher.rate_limiter.min_interval > 0
+    assert fetcher.base_url.startswith("https://clinicaltrials.gov/")

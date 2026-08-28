@@ -39,6 +39,17 @@ ui = [
     "streamlit>=1.30",
     "plotly>=5.18",
 ]
+# Graph-RAG: the three backing stores plus the embedding model. Needs
+# `docker compose up -d`. Without this extra the analysis API, the risk
+# models and the frontend all still work; only retrieval is unavailable.
+graph = [
+    "neo4j>=5.0",
+    "opensearch-py>=2.2",
+    # Major/minor must stay within one of the qdrant image in
+    # docker-compose.yml; the client refuses a wider mismatch.
+    "qdrant-client>=1.15,<2.0",
+    "sentence-transformers>=3.0",
+]
 
 [tool.setuptools]
 packages = []
@@ -63,6 +74,7 @@ markers = [
     # failure the moment someone fixes it. There are currently none.
     "known_defect: characterizes a real bug that is proven but not yet fixed",
     "network: requires outbound network access (deselected by default)",
+    "requires_stack: needs Neo4j/OpenSearch/Qdrant from docker-compose; skipped when unreachable",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",

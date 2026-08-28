@@ -87,6 +87,34 @@ class EvidenceIngestionService:
         logger.info(f"Retrieved {len(evidence)} records")
         return evidence
 
+    def enrich_entities(self, evidence: List[MedicalEvidence]) -> List[MedicalEvidence]:
+        """Populate `.entities` on each record, in place.
+
+        `ingest_medical_evidence` leaves entities empty; this fills them
+        from the record's own title, abstract and MeSH headings. The
+        storage layer reads `.entities` to build the graph, so without
+        this step every indexed document arrives with no edges.
+        """
+        for item in evidence:
+            item.entities = self._entities_for(item)
+        return evidence
+
+    def _entities_for(self, item: MedicalEvidence) -> Dict[str, List[str]]:
+        text = " ".join(filter(None, [item.title, item.abstract]))
+        found = extract_entities_from_text(text) if text else {}
+
+        # MeSH headings are assigned by human indexers; keep them ahead of
+        # the keyword matcher's guesses, and drop duplicates.
+        conditions = list(dict.fromkeys(
+            (item.mesh_terms or []) + found.get("conditions", [])))
+
+        return {
+            "conditions": conditions,
+            "interventions": found.get("interventions", []),
+            "outcomes": found.get("outcomes", []),
+            "populations": found.get("populations", []),
+        }
+
     def parse_normalize(self, evidence: List[MedicalEvidence]) -> List[Dict[str, Any]]:
         """Normalise records into the shape the graph service consumes.
 
@@ -97,13 +125,7 @@ class EvidenceIngestionService:
         """
         normalized = []
         for item in evidence:
-            text = " ".join(filter(None, [item.title, item.abstract]))
-            entities = extract_entities_from_text(text) if text else {}
-
-            # MeSH headings are curated by indexers; prefer them over the
-            # keyword matcher where both are available.
-            conditions = list(dict.fromkeys(
-                (item.mesh_terms or []) + entities.get("conditions", [])))
+            entities = self._entities_for(item)
 
             record = {
                 "id": item.id,
@@ -111,12 +133,7 @@ class EvidenceIngestionService:
                 "type": "clinical_trial" if item.nct_id else "publication",
                 "title": item.title,
                 "timestamp": item.pub_date or "",
-                "entities": {
-                    "conditions": conditions,
-                    "interventions": entities.get("interventions", []),
-                    "outcomes": entities.get("outcomes", []),
-                    "populations": entities.get("populations", []),
-                },
+                "entities": entities,
                 "metadata": {
                     "journal": item.journal,
                     "authors": item.authors,

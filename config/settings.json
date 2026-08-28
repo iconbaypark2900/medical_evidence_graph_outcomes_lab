@@ -3,14 +3,18 @@
         "evidence_ingestion_service": {
             "enabled": true,
             "schedule": "0 2 * * *",
-            "data_sources": ["pubmed", "clinicaltrials", "guidelines"]
+            "data_sources": [
+                "pubmed",
+                "clinicaltrials",
+                "guidelines"
+            ]
         },
         "evidence_graph_service": {
             "enabled": true,
             "graph_database": {
                 "uri": "bolt://localhost:7687",
                 "username": "neo4j",
-                "password": "password"
+                "password": "password123"
             },
             "models": {
                 "kge_model": "transE",
@@ -25,22 +29,29 @@
             },
             "qdrant": {
                 "host": "localhost",
-                "port": 6333
+                "port": 6343
             },
             "neo4j": {
                 "uri": "bolt://localhost:7687",
                 "username": "neo4j",
-                "password": "password"
+                "password": "password123"
             }
         },
         "outcomes_analytics_service": {
             "enabled": true,
             "max_cohort_size": 100000,
-            "survival_analysis_methods": ["kaplan_meier", "cox_regression"]
+            "survival_analysis_methods": [
+                "kaplan_meier",
+                "cox_regression"
+            ]
         },
         "pathway_guideline_service": {
             "enabled": true,
-            "guideline_sources": ["ada", "aha", "nccn"],
+            "guideline_sources": [
+                "ada",
+                "aha",
+                "nccn"
+            ],
             "update_frequency": "monthly"
         }
     },

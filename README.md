@@ -67,13 +67,10 @@ The Medical Evidence Graph & Outcomes Insight Lab is a sophisticated platform de
 | Evidence ingestion service | working; delegates to `src/data_ingestion.py`, emits records the graph service consumes |
 | Outcomes analytics service | working; cohort criteria applied for real, log-rank tests for group comparison |
 | Evidence graph service | link suggestion working (Adamic-Adar over the real graph); **KGE embeddings not implemented** — `recompute_kge_features` raises rather than returning random vectors |
-| Evidence **graph** storage (Neo4j) and graph-RAG | **not wired up** — `src/graph_rag_service/main.py` retrieval is still `MockOpenSearch` / `MockQdrant` / `MockNeo4j` |
+| Evidence storage (Neo4j + OpenSearch + Qdrant) | working — `src/integration.py` indexes into all three |
+| Graph-RAG hybrid retrieval | working — BM25 + vector + graph traversal, fused, with citations |
 | Pathway & guideline service | not exercised |
 | Vault / OPA / Presidio / MLflow / Langfuse | not integrated |
-
-Real Neo4j, OpenSearch and Qdrant clients exist in `src/integration.py` and
-`src/db_connection_test.py`, but nothing in the API path calls them yet. The
-graph service holds its nodes in memory.
 
 ## Setup
 
@@ -94,14 +91,20 @@ DoWhy, EconML) — none of which any tested path imports yet.
 See [`tests/README.md`](tests/README.md) for what the suite covers and why
 several tests assert that the same request twice returns the same answer.
 
-### Backing services
+### Backing services (for graph-RAG)
 
 ```bash
+.venv/bin/pip install -e '.[graph]'
 docker compose up -d          # Neo4j, OpenSearch, Qdrant
 ```
 
-Only needed for the graph work listed as not wired up above. The API,
-the analysis library and the frontend run without them.
+Qdrant is published on **6343**, not its default 6333, which is commonly
+already taken by another Qdrant on a developer machine. Neo4j credentials
+are `neo4j` / `password123`, set in `docker-compose.yml` and matched in
+`config/settings.json`.
+
+Everything except retrieval runs without these — the analysis API, the
+risk models and the frontend need no backing stores.
 
 ## Usage
 
@@ -145,6 +148,29 @@ Cohorts are supplied as CSV uploads. Required columns are listed on each
 page; `src/cohort_io.py` converts them and reports the offending row and
 column when a file cannot be used.
 
+### Graph-RAG
+
+Ingest from the live APIs and index into all three stores:
+
+```bash
+.venv/bin/python -m src.integration
+```
+
+Then query. Retrieval runs BM25 (OpenSearch), vector search (Qdrant,
+`all-MiniLM-L6-v2`) and graph traversal (Neo4j) over the same corpus and
+combines them with reciprocal rank fusion — rank-based, because a BM25
+score and a cosine similarity are not on the same scale:
+
+```bash
+.venv/bin/python -m src.graph_rag_service.main
+```
+
+Each result carries its citation (PMID or NCT id), which retrievers found
+it and at what rank, and the condition/intervention/outcome context from
+the graph. The reported `coverage` measures how many retrievers agreed —
+it is a statement about retrieval consensus, not about whether the
+evidence answers the question.
+
 ### Analysis library directly
 
 ```bash
@@ -154,14 +180,12 @@ column when a file cannot be used.
 
 ### Other services
 
-The remaining services under `src/` are not yet wired into the API:
-
 ```bash
-.venv/bin/python main.py evidence_ingestion_service
-.venv/bin/python main.py evidence_graph_service
-.venv/bin/python main.py graph_rag_service
-.venv/bin/python main.py outcomes_analytics_service
-.venv/bin/python main.py pathway_guideline_service
+.venv/bin/python main.py evidence_ingestion_service   # live PubMed + ClinicalTrials.gov
+.venv/bin/python main.py evidence_graph_service       # in-memory graph, link suggestion
+.venv/bin/python main.py graph_rag_service            # needs docker compose + an index
+.venv/bin/python main.py outcomes_analytics_service   # cohort analytics demo
+.venv/bin/python main.py pathway_guideline_service    # not yet reviewed
 ```
 
 ## Security, Privacy & Governance

@@ -50,11 +50,18 @@ services:
       retries: 5
 
   qdrant:
-    image: qdrant/qdrant:v1.5.0
+    # Matched to the qdrant-client major/minor in pyproject.toml. The
+    # client refuses a mismatch wider than one minor version, and the
+    # v1.5.0 pin here predated the client API this service uses.
+    image: qdrant/qdrant:v1.19.0
     container_name: medical-evidence-graph-qdrant
+    # Host ports 6343/6344, not the Qdrant defaults: 6333/6334 are commonly
+    # already taken by another Qdrant on a developer machine, and binding
+    # over it would either fail to start or point this project at someone
+    # else's collections. The container still listens on 6333 internally.
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "6343:6333"
+      - "6344:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:

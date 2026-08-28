@@ -3,6 +3,7 @@ Data ingestion module to fetch real medical evidence from public APIs
 """
 import asyncio
 import aiohttp
+import time
 import urllib.parse
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Any
@@ -15,6 +16,38 @@ from dataclasses import dataclass
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# NCBI allows roughly 3 requests per second without an API key. Firing
+# requests back to back earns a 429, which -- now that a 429 raises rather
+# than returning [] -- fails the whole ingest rather than silently
+# under-populating it. Pace the requests instead.
+PUBMED_MIN_INTERVAL = 0.36
+RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+class RateLimiter:
+    """Enforces a minimum interval between requests."""
+
+    def __init__(self, min_interval: float):
+        self.min_interval = min_interval
+        self._lock = asyncio.Lock()
+        self._last = 0.0
+
+    async def wait(self) -> None:
+        async with self._lock:
+            elapsed = time.monotonic() - self._last
+            if elapsed < self.min_interval:
+                await asyncio.sleep(self.min_interval - elapsed)
+            self._last = time.monotonic()
+
+
+class RetryableStatus(Exception):
+    """Internal signal: the server asked us to come back later."""
+
+    def __init__(self, status: int):
+        self.status = status
+        super().__init__(f"HTTP {status}")
 
 
 @dataclass
@@ -36,9 +69,37 @@ class MedicalEvidence:
 class PubMedFetcher:
     """Fetches medical evidence from PubMed API"""
     
-    def __init__(self):
+    def __init__(self, max_retries: int = 3, retry_backoff: float = 0.5,
+                 min_interval: float = PUBMED_MIN_INTERVAL):
         self.base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
         self.session = None
+        self.max_retries = max_retries
+        self.retry_backoff = retry_backoff
+        self.rate_limiter = RateLimiter(min_interval)
+
+    async def _get(self, url: str, read):
+        """Fetch `url`, retrying transient statuses with backoff.
+
+        `read` turns the response into a value. A 429 or 5xx is retried
+        because it means "not now", not "nothing found"; every other
+        non-200 raises immediately.
+        """
+        last_status = None
+        for attempt in range(self.max_retries + 1):
+            await self.rate_limiter.wait()
+            async with self.session.get(url) as response:
+                if response.status == 200:
+                    return await read(response)
+                last_status = response.status
+                if response.status not in RETRYABLE_STATUSES:
+                    break
+            if attempt < self.max_retries:
+                delay = self.retry_backoff * (2 ** attempt)
+                logger.warning(
+                    f"HTTP {last_status} from {url[:60]}...; retrying in {delay:.1f}s "
+                    f"({attempt + 1}/{self.max_retries})")
+                await asyncio.sleep(delay)
+        raise RetryableStatus(last_status)
     
     async def __aenter__(self):
         self.session = aiohttp.ClientSession()
@@ -79,20 +140,20 @@ class PubMedFetcher:
         reserved for the one case where it is true: the query matched nothing.
         """
         try:
-            search_url = self._build_search_url(query, max_results)
-            async with self.session.get(search_url) as response:
-                if response.status != 200:
-                    # A 429 (rate limit) or 5xx used to return [] here, which
-                    # is indistinguishable from an exhaustive search that
-                    # found nothing -- and silently under-populates the
-                    # evidence graph everything downstream reasons over.
-                    raise RuntimeError(
-                        f"PubMed search for {query!r} returned HTTP "
-                        f"{response.status}")
-                data = await response.json()
-                id_list = data.get("esearchresult", {}).get("idlist", [])
-                logger.info(f"Found {len(id_list)} results for query: {query}")
-                return id_list
+            data = await self._get(
+                self._build_search_url(query, max_results),
+                lambda response: response.json())
+            id_list = data.get("esearchresult", {}).get("idlist", [])
+            logger.info(f"Found {len(id_list)} results for query: {query}")
+            return id_list
+        except RetryableStatus as e:
+            # A 429 or 5xx used to return [] here, which is
+            # indistinguishable from an exhaustive search that found
+            # nothing -- and silently under-populates the evidence graph
+            # everything downstream reasons over.
+            raise RuntimeError(
+                f"PubMed search for {query!r} returned HTTP {e.status} "
+                f"after {self.max_retries} retries") from e
         except RuntimeError:
             raise
         except Exception as e:
@@ -170,38 +231,38 @@ class PubMedFetcher:
             return []
 
         try:
-            fetch_url = self._build_fetch_url(pmids)
-            async with self.session.get(fetch_url) as response:
-                if response.status != 200:
-                    raise RuntimeError(
-                        f"PubMed fetch for {len(pmids)} pmids returned HTTP "
-                        f"{response.status}")
+            content = await self._get(
+                self._build_fetch_url(pmids),
+                lambda response: response.text())
+            root = ET.fromstring(content)
 
-                content = await response.text()
-                root = ET.fromstring(content)
 
-                articles = []
-                for article in root.findall(".//PubmedArticle"):
-                    # Scope the PMID lookup to the citation: a bare .//PMID
-                    # can also match ids inside reference and comment lists.
-                    pmid = self._text_of(article.find("./MedlineCitation/PMID"))
+            articles = []
+            for article in root.findall(".//PubmedArticle"):
+                # Scope the PMID lookup to the citation: a bare .//PMID
+                # can also match ids inside reference and comment lists.
+                pmid = self._text_of(article.find("./MedlineCitation/PMID"))
 
-                    articles.append({
-                        "pmid": pmid,
-                        "title": self._text_of(article.find(".//ArticleTitle")),
-                        "abstract": self._parse_abstract(article),
-                        "journal": self._text_of(article.find(".//Journal/Title")),
-                        "pub_date": self._parse_pub_date(article),
-                        "authors": self._parse_authors(article),
-                        "mesh_terms": [
-                            self._text_of(term)
-                            for term in article.findall(".//MeshHeading/DescriptorName")
-                        ],
-                        "source": "PubMed",
-                    })
+                articles.append({
+                    "pmid": pmid,
+                    "title": self._text_of(article.find(".//ArticleTitle")),
+                    "abstract": self._parse_abstract(article),
+                    "journal": self._text_of(article.find(".//Journal/Title")),
+                    "pub_date": self._parse_pub_date(article),
+                    "authors": self._parse_authors(article),
+                    "mesh_terms": [
+                        self._text_of(term)
+                        for term in article.findall(".//MeshHeading/DescriptorName")
+                    ],
+                    "source": "PubMed",
+                })
 
-                logger.info(f"Fetched {len(articles)} articles from PubMed")
-                return articles
+            logger.info(f"Fetched {len(articles)} articles from PubMed")
+            return articles
+        except RetryableStatus as e:
+            raise RuntimeError(
+                f"PubMed fetch for {len(pmids)} pmids returned HTTP {e.status} "
+                f"after {self.max_retries} retries") from e
         except RuntimeError:
             raise
         except Exception as e:
@@ -210,12 +271,16 @@ class PubMedFetcher:
                 f"PubMed fetch failed for {len(pmids)} pmids: {e}") from e
 
 
-class ClinicalTrialsFetcher:
-    """Fetches clinical trial data from ClinicalTrials.gov API"""
+class ClinicalTrialsFetcher(PubMedFetcher):
+    """Fetches clinical trial data from ClinicalTrials.gov API.
+
+    Inherits the retry and pacing behaviour; only the endpoints differ.
+    """
     
-    def __init__(self):
+    def __init__(self, max_retries: int = 3, retry_backoff: float = 0.5,
+                 min_interval: float = 0.2):
+        super().__init__(max_retries, retry_backoff, min_interval)
         self.base_url = "https://clinicaltrials.gov/api/"
-        self.session = None
     
     async def __aenter__(self):
         self.session = aiohttp.ClientSession()
@@ -249,17 +314,17 @@ class ClinicalTrialsFetcher:
         Any transport or API failure raises.
         """
         try:
-            search_url = self._build_search_url(query, max_results)
-            async with self.session.get(search_url) as response:
-                if response.status != 200:
-                    raise RuntimeError(
-                        f"ClinicalTrials.gov search for {query!r} returned "
-                        f"HTTP {response.status}")
-                data = await response.json()
-                studies = data.get("studies", [])
+            data = await self._get(
+                self._build_search_url(query, max_results),
+                lambda response: response.json())
+            studies = data.get("studies", [])
 
-                logger.info(f"Found {len(studies)} clinical trials for query: {query}")
-                return studies
+            logger.info(f"Found {len(studies)} clinical trials for query: {query}")
+            return studies
+        except RetryableStatus as e:
+            raise RuntimeError(
+                f"ClinicalTrials.gov search for {query!r} returned HTTP "
+                f"{e.status} after {self.max_retries} retries") from e
         except RuntimeError:
             raise
         except Exception as e:

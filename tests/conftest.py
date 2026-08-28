@@ -212,3 +212,47 @@ def fake_response():
 @pytest.fixture
 def fake_session():
     return FakeSession
+
+
+# --------------------------------------------------------------------------
+# Backing-stack detection
+#
+# Tests marked `requires_stack` need the docker-compose services. They skip
+# rather than fail when those are down, so the default suite stays runnable
+# with nothing but a venv -- but they do NOT skip silently once the stack is
+# up, which is the point: the retrieval path has to be exercised against
+# real Neo4j, OpenSearch and Qdrant, not against fakes only.
+# --------------------------------------------------------------------------
+
+def _probe(url: str, timeout: float = 1.5) -> bool:
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return response.status == 200
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+@pytest.fixture(scope="session")
+def stack_available() -> bool:
+    import json
+    import pathlib as _pathlib
+
+    config = json.loads(_pathlib.Path("config/settings.json").read_text())
+    rag = config["services"]["graph_rag_service"]
+    qdrant_port = rag["qdrant"].get("port", 6333)
+    opensearch_port = rag["opensearch"].get("port", 9200)
+
+    return (
+        _probe(f"http://localhost:{opensearch_port}/_cluster/health")
+        and _probe(f"http://localhost:{qdrant_port}/readyz")
+        and _probe("http://localhost:7474/")
+    )
+
+
+@pytest.fixture
+def require_stack(stack_available):
+    if not stack_available:
+        pytest.skip(
+            "Neo4j/OpenSearch/Qdrant not reachable; run `docker compose up -d`")
