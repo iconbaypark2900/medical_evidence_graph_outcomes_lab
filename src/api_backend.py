@@ -43,6 +43,7 @@ from sklearn.metrics import r2_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 
 from src.data_ingestion import ClinicalTrialsFetcher, PubMedFetcher
+from src.audit import AuditLog, actor_id
 from src.phi import PHIDetected, scanner_from_config
 from src.outcomes_analytics_service.main import (
     CohortDefinition,
@@ -134,6 +135,7 @@ def load_phi_scanner(config_path: str = "config/settings.json"):
 
 
 phi_scanner = load_phi_scanner()
+audit_log = AuditLog()
 
 if phi_scanner.enabled:
     logger.info(f"PHI detection: {phi_scanner.backend}, "
@@ -862,7 +864,7 @@ async def health_check():
 # ---------------------------------------------------------------------------
 
 @app.post("/api/models/risk/train")
-async def train_risk_models(request: TrainRiskModelRequest, _key: str = Depends(require_api_key)):
+async def train_risk_models(request: TrainRiskModelRequest, _key: Optional[str] = Depends(require_api_key)):
     """Fit risk models on labelled patients and report held-out performance.
 
     Splitting matters here: a random forest scored on its own training rows
@@ -870,6 +872,9 @@ async def train_risk_models(request: TrainRiskModelRequest, _key: str = Depends(
     """
     screen_for_phi(request.training_data)
     logger.info(f"Training risk models on {len(request.training_data)} patients")
+    audit_log.record(
+        "risk_model.train", actor=actor_id(_key),
+        n_patients=len(request.training_data), test_size=request.test_size)
 
     frame = patients_to_frame(request.training_data)
     features = feature_builder.build_patient_features(frame)
@@ -941,6 +946,11 @@ async def train_risk_models(request: TrainRiskModelRequest, _key: str = Depends(
     risk_model_registry.replace(trained)
     logger.info(f"Trained {len(trained)} risk models, version {risk_model_registry.version}")
 
+    audit_log.record(
+        "risk_model.trained", actor=actor_id(_key),
+        model_version=risk_model_registry.version,
+        outcomes=sorted(trained), skipped=sorted(skipped))
+
     return {
         "status": "success",
         "model_version": risk_model_registry.version,
@@ -951,7 +961,7 @@ async def train_risk_models(request: TrainRiskModelRequest, _key: str = Depends(
 
 
 @app.post("/api/patients/risk-assessment")
-async def assess_patient_risk(patients: List[PatientInput], _key: str = Depends(require_api_key)):
+async def assess_patient_risk(patients: List[PatientInput], _key: Optional[str] = Depends(require_api_key)):
     """Score patients with the currently registered risk models."""
     if not patients:
         raise HTTPException(status_code=422, detail="No patients supplied")
@@ -968,6 +978,9 @@ async def assess_patient_risk(patients: List[PatientInput], _key: str = Depends(
                    "/api/models/risk/train first.")
 
     logger.info(f"Assessing risk for {len(patients)} patients")
+    audit_log.record(
+        "risk.assess", actor=actor_id(_key), n_patients=len(patients),
+        model_version=risk_model_registry.version)
 
     frame = patients_to_frame(patients)
     features = feature_builder.build_patient_features(frame)
@@ -1009,7 +1022,7 @@ async def assess_patient_risk(patients: List[PatientInput], _key: str = Depends(
 # ---------------------------------------------------------------------------
 
 @app.post("/api/survival-analysis/kaplan-meier")
-async def kaplan_meier_analysis(request: SurvivalAnalysisRequest, _key: str = Depends(require_api_key)):
+async def kaplan_meier_analysis(request: SurvivalAnalysisRequest, _key: Optional[str] = Depends(require_api_key)):
     """Kaplan-Meier estimate from the supplied follow-up.
 
     Both inputs come from `follow_up` on each patient. The endpoint
@@ -1019,6 +1032,10 @@ async def kaplan_meier_analysis(request: SurvivalAnalysisRequest, _key: str = De
     """
     screen_for_phi(request.patient_data)
     logger.info(f"Running Kaplan-Meier analysis for {len(request.patient_data)} patients")
+    audit_log.record(
+        "survival.kaplan_meier", actor=actor_id(_key),
+        n_patients=len(request.patient_data),
+        horizon_days=request.time_horizon_days)
 
     duration = np.array([p.follow_up.observed_time_days for p in request.patient_data])
     event = np.array([int(p.follow_up.event_observed) for p in request.patient_data])
@@ -1058,7 +1075,7 @@ async def kaplan_meier_analysis(request: SurvivalAnalysisRequest, _key: str = De
 
 
 @app.post("/api/survival-analysis/cox-regression")
-async def cox_regression_analysis(request: SurvivalAnalysisRequest, _key: str = Depends(require_api_key)):
+async def cox_regression_analysis(request: SurvivalAnalysisRequest, _key: Optional[str] = Depends(require_api_key)):
     """Cox proportional hazards on the supplied covariates and follow-up.
 
     The covariates were always real; the outcome was not. `observed_time`
@@ -1067,6 +1084,9 @@ async def cox_regression_analysis(request: SurvivalAnalysisRequest, _key: str = 
     """
     screen_for_phi(request.patient_data)
     logger.info(f"Running Cox regression for {len(request.patient_data)} patients")
+    audit_log.record(
+        "survival.cox", actor=actor_id(_key),
+        n_patients=len(request.patient_data))
 
     frame = patients_to_frame(request.patient_data)
     frame['gender_encoded'] = (frame['gender'] == 'M').astype(int)
@@ -1114,7 +1134,7 @@ async def cox_regression_analysis(request: SurvivalAnalysisRequest, _key: str = 
 # ---------------------------------------------------------------------------
 
 @app.post("/api/causal-inference/ate-estimation")
-async def estimate_ate(request: CausalAnalysisRequest, _key: str = Depends(require_api_key)):
+async def estimate_ate(request: CausalAnalysisRequest, _key: Optional[str] = Depends(require_api_key)):
     """Average treatment effect from observed assignments and outcomes.
 
     Treatment and outcome now come from the request. They were previously
@@ -1124,6 +1144,10 @@ async def estimate_ate(request: CausalAnalysisRequest, _key: str = Depends(requi
     """
     screen_for_phi(request.patient_data)
     logger.info(f"Estimating ATE for {len(request.patient_data)} patients")
+    audit_log.record(
+        "causal.ate", actor=actor_id(_key),
+        n_patients=len(request.patient_data),
+        treatment=request.treatment_variable, outcome=request.outcome_variable)
 
     frame = patients_to_frame(request.patient_data)
     frame['gender_encoded'] = (frame['gender'] == 'M').astype(int)
@@ -1254,7 +1278,7 @@ def summarise_cohort(members: List[CohortMember]) -> Dict[str, Any]:
 
 
 @app.post("/api/cohorts/compare")
-async def compare_cohorts(request: CohortAnalysisRequest, _key: str = Depends(require_api_key)):
+async def compare_cohorts(request: CohortAnalysisRequest, _key: Optional[str] = Depends(require_api_key)):
     """Compare two cohorts on their observed outcomes, with real tests."""
     if not request.comparator_cohort:
         raise HTTPException(
@@ -1263,6 +1287,10 @@ async def compare_cohorts(request: CohortAnalysisRequest, _key: str = Depends(re
                    "compare a single cohort against")
 
     screen_for_phi(request.patient_cohort + request.comparator_cohort)
+    audit_log.record(
+        "cohort.compare", actor=actor_id(_key),
+        n_cohort=len(request.patient_cohort),
+        n_comparator=len(request.comparator_cohort), alpha=request.alpha)
     logger.info(
         f"Comparing cohorts: {len(request.patient_cohort)} vs "
         f"{len(request.comparator_cohort)} patients")
@@ -1362,7 +1390,7 @@ def build_cohort(request: CohortBuildRequest, groups: Optional[List[str]] = None
 
 @app.post("/api/outcomes/cohort")
 async def build_cohort_endpoint(request: CohortBuildRequest,
-                                _key: str = Depends(require_api_key)):
+                                _key: Optional[str] = Depends(require_api_key)):
     """Apply inclusion/exclusion criteria and report the resulting cohort.
 
     Criteria are applied to the patients you supply. A criterion naming a
@@ -1372,6 +1400,9 @@ async def build_cohort_endpoint(request: CohortBuildRequest,
     """
     screen_for_phi(request.patients)
     definition, cohort = build_cohort(request)
+    audit_log.record(
+        "cohort.build", actor=actor_id(_key), cohort_id=request.cohort_id,
+        supplied=len(request.patients), retained=int(len(cohort)))
 
     try:
         survival = outcomes_service.run_survival_analysis(cohort)
@@ -1399,7 +1430,7 @@ async def build_cohort_endpoint(request: CohortBuildRequest,
 
 @app.post("/api/outcomes/comparative-effectiveness")
 async def comparative_effectiveness(request: ComparativeEffectivenessRequest,
-                                    _key: str = Depends(require_api_key)):
+                                    _key: Optional[str] = Depends(require_api_key)):
     """Compare arms with a log-rank test.
 
     Arm assignment must be supplied. Inferring it here would make the
@@ -1413,6 +1444,10 @@ async def comparative_effectiveness(request: ComparativeEffectivenessRequest,
 
     screen_for_phi(request.patients)
     definition, cohort = build_cohort(request, request.groups)
+    audit_log.record(
+        "cohort.comparative_effectiveness", actor=actor_id(_key),
+        cohort_id=request.cohort_id, n_patients=len(request.patients),
+        n_arms=len(set(request.groups)))
 
     try:
         result = outcomes_service.run_comparative_effectiveness_analysis(
@@ -1445,7 +1480,7 @@ async def comparative_effectiveness(request: ComparativeEffectivenessRequest,
 
 @app.post("/api/pathways/guidelines")
 async def register_guideline(request: GuidelineRequest,
-                             _key: str = Depends(require_api_key)):
+                             _key: Optional[str] = Depends(require_api_key)):
     """Register a guideline as a machine-readable pathway."""
     payload = {
         "id": request.id,
@@ -1460,6 +1495,9 @@ async def register_guideline(request: GuidelineRequest,
     stored = guideline_store.load()
     stored[request.id] = payload
     guideline_store.save(stored)
+    audit_log.record(
+        "guideline.register", actor=actor_id(_key), guideline_id=request.id,
+        n_steps=len(request.steps), version=request.version)
 
     return {
         "status": "success",
@@ -1471,7 +1509,7 @@ async def register_guideline(request: GuidelineRequest,
 
 
 @app.get("/api/pathways/guidelines")
-async def list_guidelines(_key: str = Depends(require_api_key)):
+async def list_guidelines(_key: Optional[str] = Depends(require_api_key)):
     return {
         "status": "success",
         "guidelines": [
@@ -1484,7 +1522,7 @@ async def list_guidelines(_key: str = Depends(require_api_key)):
 
 @app.post("/api/pathways/adherence")
 async def evaluate_adherence(request: AdherenceRequest,
-                             _key: str = Depends(require_api_key)):
+                             _key: Optional[str] = Depends(require_api_key)):
     """Score observed care against a registered guideline.
 
     Adherence is recomputed from the observed steps. It is never taken
@@ -1506,6 +1544,12 @@ async def evaluate_adherence(request: AdherenceRequest,
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
 
+    audit_log.record(
+        "guideline.adherence", actor=actor_id(_key),
+        guideline_id=request.guideline_id, patient_id=request.patient_id,
+        adherence_score=comparison["adherence_score"],
+        n_required=comparison["n_required"])
+
     return {
         "status": "success",
         "comparison": comparison,
@@ -1519,7 +1563,7 @@ async def guideline_evidence(
     guideline_id: str,
     per_step: int = Query(3, ge=1, le=10),
     searcher: EvidenceSearcher = Depends(get_evidence_searcher),
-    _key: str = Depends(require_api_key),
+    _key: Optional[str] = Depends(require_api_key),
 ):
     """Retrieve current evidence for each step of a guideline.
 
@@ -1574,6 +1618,25 @@ async def guideline_evidence(
     }
 
 
+@app.get("/api/audit")
+async def read_audit(
+    limit: int = Query(100, ge=1, le=1000),
+    action: Optional[str] = Query(None),
+    _key: Optional[str] = Depends(require_api_key),
+):
+    """Recent audit events, newest first.
+
+    Metadata only: who, when, which action, over how many patients. No
+    patient content is recorded, so none can be read back out.
+    """
+    return {
+        "status": "success",
+        "events": audit_log.read(limit=limit, action=action),
+        "note": ("Metadata only. Actors are a hash of the API key, so the "
+                 "log is not a list of live credentials."),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Evidence search
 # ---------------------------------------------------------------------------
@@ -1584,7 +1647,7 @@ async def search_evidence(
     limit: int = Query(10, ge=1, le=100, description="Number of results to return"),
     filters: str = Query('{}', description="JSON filters for search"),
     searcher: EvidenceSearcher = Depends(get_evidence_searcher),
-    _key: str = Depends(require_api_key),
+    _key: Optional[str] = Depends(require_api_key),
 ):
     """Search published evidence.
 
@@ -1604,6 +1667,10 @@ async def search_evidence(
         # read as "no evidence exists for this query".
         logger.error(f"Evidence search failed: {e}")
         raise HTTPException(status_code=502, detail=f"Evidence source unavailable: {e}") from e
+
+    audit_log.record(
+        "evidence.search", actor=actor_id(_key), query=query,
+        limit=limit, mode=response.mode, n_results=len(response.results))
 
     return {
         "status": "success",

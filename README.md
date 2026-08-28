@@ -255,6 +255,22 @@ evidence answers the question.
 .venv/bin/python main.py pathway_guideline_service    # not yet reviewed
 ```
 
+### Audit trail
+
+Every analysis records who ran it, when, over how many patients, and with
+which model or guideline — to `MEG_AUDIT_LOG` (default
+`.audit/audit.jsonl`), append-only, one JSON object per line. Ingestion
+runs record themselves too, since "ingested datasets" is the first thing
+the promise names.
+
+**Metadata only.** Passing anything shaped like a patient record is
+refused, by shape rather than by field name: an audit log that accumulates
+the data it audits becomes the largest copy of that data in the system,
+in the file least likely to be access-controlled. Actors are a hash of the
+API key, so the log is not a list of live credentials.
+
+`GET /api/audit` reads it back, and the **Audit Trail** page shows it.
+
 ### PHI screening
 
 Every endpoint that accepts patient data screens its free-text fields —

@@ -932,6 +932,46 @@ def page_guideline_evidence():
     st.info(result["note"])
 
 
+def page_audit():
+    st.header("🧾 Audit Trail")
+    require_connection()
+
+    st.write(
+        "Who ran which analysis, when, and over how many patients. "
+        "Metadata only — no patient content is recorded, so none can be "
+        "read back out here."
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        limit = st.slider("Events to show", 10, 500, 100, step=10)
+    with col2:
+        action_filter = st.text_input("Filter by action (optional)", "")
+
+    params = {"limit": limit}
+    if action_filter.strip():
+        params["action"] = action_filter.strip()
+
+    result = call_api("GET", "/api/audit", params=params)
+    if result is None:
+        return
+
+    events = result["events"]
+    if not events:
+        st.info("No audit events recorded yet.")
+        return
+
+    frame = pd.DataFrame(events)
+    # Timestamp, actor and action first; whatever metadata each action
+    # carries follows.
+    leading = [c for c in ("timestamp", "actor", "action", "outcome")
+               if c in frame.columns]
+    frame = frame[leading + [c for c in frame.columns if c not in leading]]
+    st.dataframe(frame, hide_index=True, use_container_width=True)
+
+    st.caption(f"{len(events)} event(s). {result['note']}")
+
+
 PAGES = {
     "Dashboard": page_dashboard,
     "Train Risk Model": page_train_risk_model,
@@ -943,6 +983,7 @@ PAGES = {
     "Guidelines & Adherence": page_guidelines,
     "Evidence for a Guideline": page_guideline_evidence,
     "Evidence Search": page_evidence_search,
+    "Audit Trail": page_audit,
     "Cohort Analysis": page_cohort_analysis,
 }
 

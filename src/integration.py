@@ -519,6 +519,16 @@ async def integrate_ingestion_and_storage(
         # between windows is harmless.
         results = await store.store_all_evidence(evidence)
         state.record(search_terms)
+
+        # "Ingested datasets" is the first thing the README's audit promise
+        # names, and ingestion happens outside any HTTP request.
+        from src.audit import AuditLog
+        AuditLog().record(
+            "evidence.ingest", actor="cli",
+            terms=list(search_terms), incremental=incremental,
+            since=since.isoformat() if since else None,
+            indexed=results["opensearch"])
+
         return results
     finally:
         await store.close()

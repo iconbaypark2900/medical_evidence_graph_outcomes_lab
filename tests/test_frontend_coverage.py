@@ -54,17 +54,29 @@ def test_the_evidence_join_has_an_interface():
     assert "Evidence for a Guideline" in FRONTEND
 
 
+def frontend_module():
+    """Import the frontend, which needs the optional `ui` extra.
+
+    Most of this file reads the source text and needs no import; only the
+    two checks below actually load the module.
+    """
+    pytest.importorskip("streamlit", reason="the ui extra is not installed")
+    pytest.importorskip("plotly", reason="the ui extra is not installed")
+    import src.frontend_interface as frontend
+
+    return frontend
+
+
 @pytest.mark.parametrize("page", [
     "Cohort Builder",
     "Treatment Effect",
+    "Audit Trail",
     "Comparative Effectiveness",
     "Guidelines & Adherence",
     "Evidence for a Guideline",
 ])
 def test_the_new_pages_are_registered(page):
-    import src.frontend_interface as frontend
-
-    assert page in frontend.PAGES
+    assert page in frontend_module().PAGES
 
 
 def test_the_outcomes_service_is_reachable_from_the_ui():
@@ -74,9 +86,7 @@ def test_the_outcomes_service_is_reachable_from_the_ui():
 
 
 def test_every_registered_page_has_a_callable():
-    import src.frontend_interface as frontend
-
-    for name, handler in frontend.PAGES.items():
+    for name, handler in frontend_module().PAGES.items():
         assert callable(handler), name
 
 
