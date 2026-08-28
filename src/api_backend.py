@@ -44,6 +44,7 @@ from sklearn.model_selection import train_test_split
 
 from src.data_ingestion import ClinicalTrialsFetcher, PubMedFetcher
 from src.audit import AuditLog, actor_id
+from src.observability import Metrics, RequestTimer, tracker_from_config
 from src.phi import PHIDetected, scanner_from_config
 from src.outcomes_analytics_service.main import (
     CohortDefinition,
@@ -136,6 +137,18 @@ def load_phi_scanner(config_path: str = "config/settings.json"):
 
 phi_scanner = load_phi_scanner()
 audit_log = AuditLog()
+metrics = Metrics()
+
+
+def load_tracker(config_path: str = "config/settings.json"):
+    try:
+        config = json.loads(Path(config_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        config = {}
+    return tracker_from_config(config)
+
+
+experiment_tracker = load_tracker()
 
 if phi_scanner.enabled:
     logger.info(f"PHI detection: {phi_scanner.backend}, "
@@ -169,6 +182,25 @@ async def require_api_key(api_key: str = Security(api_key_header)) -> Optional[s
         detail="A valid X-API-Key header is required.",
         headers={"WWW-Authenticate": "APIKey"},
     )
+
+
+@app.middleware("http")
+async def record_metrics(request, call_next):
+    """Count and time every request.
+
+    The route template is the label, not the concrete path: labelling by
+    path would create a new time series per guideline id and blow up
+    cardinality, which is the standard way a metrics endpoint becomes the
+    heaviest thing in the service.
+    """
+    with RequestTimer() as timer:
+        response = await call_next(request)
+
+    route = request.scope.get("route")
+    endpoint = getattr(route, "path", request.url.path)
+    metrics.observe_request(
+        request.method, endpoint, response.status_code, timer.seconds)
+    return response
 
 
 app.add_middleware(
@@ -380,6 +412,7 @@ def screen_for_phi(patients: List[PatientInput]) -> None:
         try:
             phi_scanner.enforce(free_text_of(patient))
         except PHIDetected as e:
+            metrics.phi_rejections.inc()
             # The message names the field and the kind, never the matched
             # text -- echoing it back would copy the identifier into logs.
             raise HTTPException(status_code=422, detail=str(e)) from e
@@ -584,6 +617,8 @@ class RiskModelRegistry:
 risk_model_registry = RiskModelRegistry()
 risk_model_registry.__init_store__()
 risk_model_registry.load()
+
+metrics.observe_risk_model(risk_model_registry.models)
 
 outcomes_service = OutcomesAnalyticsService()
 pathway_service = PathwayGuidelineService()
@@ -856,6 +891,8 @@ async def health_check():
         "authentication": "api_key" if API_KEYS else "disabled",
         # What is actually done, not what a config flag asserts.
         "phi_detection": phi_scanner.describe,
+        "experiment_tracking": experiment_tracker.describe,
+        "metrics_endpoint": "/metrics",
     }
 
 
@@ -872,6 +909,7 @@ async def train_risk_models(request: TrainRiskModelRequest, _key: Optional[str] 
     """
     screen_for_phi(request.training_data)
     logger.info(f"Training risk models on {len(request.training_data)} patients")
+    metrics.observe_analysis("risk_model.train", len(request.training_data))
     audit_log.record(
         "risk_model.train", actor=actor_id(_key),
         n_patients=len(request.training_data), test_size=request.test_size)
@@ -946,6 +984,11 @@ async def train_risk_models(request: TrainRiskModelRequest, _key: Optional[str] 
     risk_model_registry.replace(trained)
     logger.info(f"Trained {len(trained)} risk models, version {risk_model_registry.version}")
 
+    metrics.observe_risk_model(trained)
+    experiment_tracker.log_training(
+        risk_model_registry.version, trained,
+        params={"test_size": request.test_size,
+                "n_patients": len(request.training_data)})
     audit_log.record(
         "risk_model.trained", actor=actor_id(_key),
         model_version=risk_model_registry.version,
@@ -978,6 +1021,7 @@ async def assess_patient_risk(patients: List[PatientInput], _key: Optional[str] 
                    "/api/models/risk/train first.")
 
     logger.info(f"Assessing risk for {len(patients)} patients")
+    metrics.observe_analysis("risk.assess", len(patients))
     audit_log.record(
         "risk.assess", actor=actor_id(_key), n_patients=len(patients),
         model_version=risk_model_registry.version)
@@ -1032,6 +1076,7 @@ async def kaplan_meier_analysis(request: SurvivalAnalysisRequest, _key: Optional
     """
     screen_for_phi(request.patient_data)
     logger.info(f"Running Kaplan-Meier analysis for {len(request.patient_data)} patients")
+    metrics.observe_analysis("survival.kaplan_meier", len(request.patient_data))
     audit_log.record(
         "survival.kaplan_meier", actor=actor_id(_key),
         n_patients=len(request.patient_data),
@@ -1084,6 +1129,7 @@ async def cox_regression_analysis(request: SurvivalAnalysisRequest, _key: Option
     """
     screen_for_phi(request.patient_data)
     logger.info(f"Running Cox regression for {len(request.patient_data)} patients")
+    metrics.observe_analysis("survival.cox", len(request.patient_data))
     audit_log.record(
         "survival.cox", actor=actor_id(_key),
         n_patients=len(request.patient_data))
@@ -1144,6 +1190,7 @@ async def estimate_ate(request: CausalAnalysisRequest, _key: Optional[str] = Dep
     """
     screen_for_phi(request.patient_data)
     logger.info(f"Estimating ATE for {len(request.patient_data)} patients")
+    metrics.observe_analysis("causal.ate", len(request.patient_data))
     audit_log.record(
         "causal.ate", actor=actor_id(_key),
         n_patients=len(request.patient_data),
@@ -1616,6 +1663,19 @@ async def guideline_evidence(
             "statement about the literature or about the recommendation."
         ),
     }
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus exposition.
+
+    Open, like the health endpoints: a scraper cannot present an API key,
+    and the series here are counts and durations, never patient content.
+    """
+    from fastapi.responses import Response
+
+    body, content_type = metrics.render()
+    return Response(content=body, media_type=content_type)
 
 
 @app.get("/api/audit")

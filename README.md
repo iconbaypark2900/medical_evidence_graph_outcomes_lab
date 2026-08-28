@@ -255,6 +255,22 @@ evidence answers the question.
 .venv/bin/python main.py pathway_guideline_service    # not yet reviewed
 ```
 
+### Metrics
+
+`GET /metrics` serves Prometheus exposition — request counts and
+durations by route, analyses and patients processed by kind, PHI
+rejections, and the loaded risk model's held-out metric. Open like the
+health endpoints, since a scraper cannot present a key and the series are
+counts, never patient content.
+
+Requests are labelled by route template rather than concrete path, so a
+guideline id does not create a new time series.
+
+MLflow experiment tracking is optional and off (`observability.mlflow`);
+enabling it without the `tracking` extra raises at startup. Langfuse was
+removed rather than implemented — it traces LLM and RAG generation, and
+this system has no generation in it.
+
 ### Audit trail
 
 Every analysis records who ran it, when, over how many patients, and with

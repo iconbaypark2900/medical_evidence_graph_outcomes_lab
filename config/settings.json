@@ -56,23 +56,21 @@
         }
     },
     "security": {
+        "_note": "Every key below is read by code. Keys describing capabilities that do not exist have been removed rather than left asserting them: auth.type said 'oidc_sso' with no OIDC anywhere, and opa.url and vault.url named services nothing contacted.",
         "auth": {
-            "type": "oidc_sso",
-            "issuer": "https://your-identity-provider.com",
-            "client_id": "your-client-id"
-        },
-        "opa": {
-            "url": "http://localhost:8181"
-        },
-        "vault": {
-            "url": "http://localhost:8200"
+            "type": "api_key",
+            "header": "X-API-Key",
+            "_not_implemented": [
+                "OIDC single sign-on: no code. The mechanism is a shared key.",
+                "Open Policy Agent: no per-role or per-dataset authorization exists. A valid key grants every endpoint."
+            ]
         },
         "api_keys": [],
         "allowed_origins": [
             "http://localhost:8501",
             "http://127.0.0.1:8501"
         ],
-        "_note": "api_keys empty means the API is unauthenticated. Set MEG_API_KEYS (comma-separated) or fill this list before exposing it beyond localhost.",
+        "_secrets_note": "Keys here are plaintext. Prefer MEG_API_KEYS in the environment. There is no Vault integration; the previous vault.url implied managed secrets while this list sat in the same file.",
         "phi": {
             "enabled": true,
             "backend": "patterns",
@@ -81,9 +79,24 @@
         }
     },
     "observability": {
-        "mlflow_tracking_uri": "http://localhost:5000",
-        "langfuse_secret_key": "",
-        "langfuse_public_key": "",
-        "prometheus_endpoint": "http://localhost:9090"
+        "_note": "Every key below is read by code.",
+        "prometheus": {
+            "enabled": true,
+            "endpoint": "/metrics",
+            "_note": "Served by the API itself; scrape it directly."
+        },
+        "mlflow": {
+            "enabled": false,
+            "tracking_uri": "http://localhost:5000",
+            "experiment": "risk-models",
+            "_note": "Optional. Needs the `tracking` extra; enabling it without mlflow installed raises at startup rather than recording nothing. Risk models already persist with their held-out metrics, and training runs appear in the audit log."
+        },
+        "audit": {
+            "path": ".audit/audit.jsonl",
+            "_note": "Append-only JSONL. Metadata only, never patient content."
+        },
+        "_not_implemented": [
+            "Langfuse: it traces LLM and RAG generation, and this system has no generation. Retrieval returns cited records and stops."
+        ]
     }
 }

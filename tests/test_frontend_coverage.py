@@ -18,9 +18,13 @@ from src.api_backend import app
 
 FRONTEND = Path("src/frontend_interface.py").read_text()
 
-# Reachable without a UI by design: probes, and the two health aliases.
-INFRASTRUCTURE_ROUTES = {"/", "/health", "/api/health", "/openapi.json",
-                         "/docs", "/docs/oauth2-redirect", "/redoc"}
+# Reachable without a UI by design: probes and scrape targets. /metrics is
+# consumed by Prometheus, not browsed by a person; the health aliases and
+# the generated docs are the same shape of exemption. Anything else that
+# ends up here should be argued for, not added quietly.
+INFRASTRUCTURE_ROUTES = {"/", "/health", "/api/health", "/metrics",
+                         "/openapi.json", "/docs", "/docs/oauth2-redirect",
+                         "/redoc"}
 
 
 def api_routes() -> set:
