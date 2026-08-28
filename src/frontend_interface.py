@@ -532,13 +532,23 @@ def page_evidence_search():
 
 
 def page_cohort_analysis():
-    st.header("🧬 Cohort Analysis & Comparison")
+    st.header("📊 Compare Outcome Rates")
     require_connection()
 
     st.write(
-        "Upload two cohorts with their observed outcomes. Both files need "
-        "`age`, `sex`, `baseline_risk_score`, `comorbidity_count`, plus the "
-        "outcome columns to compare."
+        "Compare two cohorts on named outcomes — a rate or a mean at a "
+        "single point, tested with chi-square, Fisher's exact, or Welch's "
+        "t as the data warrants. Both files need `age`, `sex`, "
+        "`baseline_risk_score`, `comorbidity_count`, plus the outcome "
+        "columns."
+    )
+    # The two comparison pages answer different questions, and a reader
+    # picking between them by name alone was the likeliest way to get the
+    # wrong analysis.
+    st.caption(
+        "For **time to event** — who died sooner, not how many died — use "
+        "**Time-to-Event Comparison**, which runs a log-rank test over "
+        "follow-up rather than comparing endpoint rates."
     )
 
     col1, col2 = st.columns(2)
@@ -666,12 +676,17 @@ def page_cohort_builder():
 
 
 def page_comparative_effectiveness():
-    st.header("⚖️ Comparative Effectiveness")
+    st.header("⚖️ Time-to-Event Comparison")
     require_connection()
 
     st.write(
-        "Compare treatment arms with a log-rank test. The file needs the "
-        "follow-up columns plus a column naming each patient's arm."
+        "Compare treatment arms on time to event with a log-rank test. The "
+        "file needs the follow-up columns — `observed_time_days` and "
+        "`event_observed` — plus a column naming each patient's arm."
+    )
+    st.caption(
+        "For **rates at a point in time** — how many had the outcome, not "
+        "how soon — use **Compare Outcome Rates**."
     )
     st.caption(
         "Arm assignment has to come from the data. Inferring it here would "
@@ -972,19 +987,36 @@ def page_audit():
     st.caption(f"{len(events)} event(s). {result['note']}")
 
 
+# One line each, shown in the sidebar. Two pages comparing cohorts need to
+# be told apart before they are clicked, not after.
+PAGE_CAPTIONS = {
+    "Dashboard": "service status",
+    "Train Risk Model": "fit on labelled patients",
+    "Patient Risk Assessment": "score one patient",
+    "Survival Analysis": "one cohort, KM and Cox",
+    "Cohort Builder": "apply criteria, then KM",
+    "Time-to-Event Comparison": "log-rank: who died sooner",
+    "Compare Outcome Rates": "chi-square / t: how many",
+    "Treatment Effect": "average treatment effect",
+    "Guidelines & Adherence": "register and score",
+    "Evidence for a Guideline": "evidence per step",
+    "Evidence Search": "search the corpus",
+    "Audit Trail": "who ran what",
+}
+
 PAGES = {
     "Dashboard": page_dashboard,
     "Train Risk Model": page_train_risk_model,
     "Patient Risk Assessment": page_risk_assessment,
     "Survival Analysis": page_survival_analysis,
     "Cohort Builder": page_cohort_builder,
-    "Comparative Effectiveness": page_comparative_effectiveness,
+    "Time-to-Event Comparison": page_comparative_effectiveness,
     "Treatment Effect": page_causal_inference,
     "Guidelines & Adherence": page_guidelines,
     "Evidence for a Guideline": page_guideline_evidence,
     "Evidence Search": page_evidence_search,
     "Audit Trail": page_audit,
-    "Cohort Analysis": page_cohort_analysis,
+    "Compare Outcome Rates": page_cohort_analysis,
 }
 
 
@@ -997,7 +1029,8 @@ def main():
         connect_to_api()
 
         st.header("Navigation")
-        page = st.radio("Select a page:", list(PAGES))
+        page = st.radio("Select a page:", list(PAGES),
+                        captions=[PAGE_CAPTIONS.get(name, "") for name in PAGES])
 
         if st.session_state.api_connected:
             st.success("✅ Connected to API")

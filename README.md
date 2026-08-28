@@ -279,6 +279,13 @@ which model or guideline — to `MEG_AUDIT_LOG` (default
 runs record themselves too, since "ingested datasets" is the first thing
 the promise names.
 
+The active file rotates at 10 MB and keeps 5 generations
+(`MEG_AUDIT_LOG` sets the path). That is a retention decision as much as
+an operational one: past those generations the history is gone, so ship
+the files somewhere durable if the record has to outlive the host.
+Reading spans rotations, since a reader that only saw the active file
+would lose history the moment it first rotated.
+
 **Metadata only.** Passing anything shaped like a patient record is
 refused, by shape rather than by field name: an audit log that accumulates
 the data it audits becomes the largest copy of that data in the system,

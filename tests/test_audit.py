@@ -206,3 +206,95 @@ def test_no_patient_content_can_be_read_back_out(audited):
     dumped = json.dumps(log.read())
     for value in ("pt_0", "Asian", "0.9", "71"):
         assert value not in dumped, f"{value!r} reached the audit log"
+
+
+# --------------------------------------------------------------------------
+# Rotation and retention
+#
+# The log is written on every analysis request and had no size cap. An
+# audit log that fills the disk takes down the service it was added to
+# protect, and does so fastest exactly when the system is busiest.
+# --------------------------------------------------------------------------
+
+def test_the_active_file_is_rotated_past_its_size_cap(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl", max_bytes=400, keep=3)
+
+    for i in range(40):
+        log.record(f"event_{i}", n=i)
+
+    assert (tmp_path / "audit.jsonl.1").exists()
+    assert log.path.stat().st_size < 400 * 2
+
+
+def test_retention_bounds_the_number_of_files(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl", max_bytes=200, keep=3)
+
+    for i in range(100):
+        log.record(f"event_{i}", n=i)
+
+    files = sorted(p.name for p in tmp_path.iterdir())
+    assert files == ["audit.jsonl", "audit.jsonl.1", "audit.jsonl.2", "audit.jsonl.3"]
+
+
+def test_total_size_stays_bounded(tmp_path):
+    """The property that matters: writing forever does not fill the disk."""
+    log = AuditLog(tmp_path / "audit.jsonl", max_bytes=500, keep=2)
+
+    for i in range(500):
+        log.record(f"event_{i}", n=i)
+
+    total = sum(p.stat().st_size for p in tmp_path.iterdir())
+    assert total < 500 * 4
+
+
+def test_reading_spans_rotations(tmp_path):
+    """A reader seeing only the active file would silently lose history the
+    moment the log first rotated -- which is when somebody is most likely
+    to be looking."""
+    log = AuditLog(tmp_path / "audit.jsonl", max_bytes=300, keep=5)
+
+    for i in range(30):
+        log.record(f"event_{i}", n=i)
+
+    actions = [e["action"] for e in log.read(limit=100)]
+    assert len(log.files()) > 1
+    assert len(actions) > len(
+        log.path.read_text().splitlines()), "read did not go past the active file"
+
+
+def test_the_newest_event_comes_first_across_rotations(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl", max_bytes=300, keep=5)
+
+    for i in range(30):
+        log.record(f"event_{i}", n=i)
+
+    assert log.read(limit=1)[0]["action"] == "event_29"
+
+
+def test_filtering_still_works_across_rotations(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl", max_bytes=300, keep=5)
+
+    for i in range(30):
+        log.record("keep" if i % 2 else "drop", n=i)
+
+    assert all(e["action"] == "keep" for e in log.read(limit=100, action="keep"))
+
+
+def test_rotation_can_be_disabled(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl", max_bytes=0)
+
+    for i in range(50):
+        log.record(f"event_{i}", n=i)
+
+    assert [p.name for p in tmp_path.iterdir()] == ["audit.jsonl"]
+
+
+def test_no_events_are_lost_before_the_retention_limit(tmp_path):
+    """Rotation must move records, not drop them, until retention bites."""
+    log = AuditLog(tmp_path / "audit.jsonl", max_bytes=400, keep=20)
+
+    for i in range(60):
+        log.record(f"event_{i}", n=i)
+
+    actions = {e["action"] for e in log.read(limit=1000)}
+    assert actions == {f"event_{i}" for i in range(60)}

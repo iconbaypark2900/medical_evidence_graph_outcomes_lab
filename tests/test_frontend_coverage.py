@@ -75,7 +75,8 @@ def frontend_module():
     "Cohort Builder",
     "Treatment Effect",
     "Audit Trail",
-    "Comparative Effectiveness",
+    "Time-to-Event Comparison",
+    "Compare Outcome Rates",
     "Guidelines & Adherence",
     "Evidence for a Guideline",
 ])
@@ -120,3 +121,36 @@ def test_the_corpus_coverage_caveat_reaches_the_reader():
 
     assert 'result["note"]' in page
     assert "No supporting record" in page
+
+
+# --------------------------------------------------------------------------
+# Telling the two comparison pages apart
+# --------------------------------------------------------------------------
+
+def test_the_two_comparison_pages_are_named_for_what_they_do():
+    """"Cohort Analysis" and "Comparative Effectiveness" sat side by side
+    doing different analyses, and the names did not distinguish them."""
+    frontend = frontend_module()
+
+    assert "Time-to-Event Comparison" in frontend.PAGES
+    assert "Compare Outcome Rates" in frontend.PAGES
+    assert "Cohort Analysis" not in frontend.PAGES
+    assert "Comparative Effectiveness" not in frontend.PAGES
+
+
+def test_each_comparison_page_points_at_the_other():
+    """A reader on the wrong one should be told where the right one is."""
+    rates = FRONTEND[FRONTEND.index("def page_cohort_analysis"):]
+    rates = rates[:rates.index("def ", 10)]
+    survival = FRONTEND[FRONTEND.index("def page_comparative_effectiveness"):]
+    survival = survival[:survival.index("def ", 10)]
+
+    assert "Time-to-Event Comparison" in rates
+    assert "Compare Outcome Rates" in survival
+
+
+def test_every_page_has_a_caption():
+    frontend = frontend_module()
+
+    missing = [name for name in frontend.PAGES if not frontend.PAGE_CAPTIONS.get(name)]
+    assert missing == [], f"pages with no sidebar caption: {missing}"
