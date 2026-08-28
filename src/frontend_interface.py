@@ -28,6 +28,8 @@ import streamlit as st
 
 from src.cohort_io import (
     CohortValidationError,
+    frame_to_patient_records,
+    frame_to_treatment_records,
     describe_api_error,
     frame_to_cohort_members,
     frame_to_patient_records,
@@ -578,11 +580,368 @@ def page_cohort_analysis():
             display_cohort_comparison(result["cohort_comparison"])
 
 
+def page_cohort_builder():
+    st.header("👥 Cohort Builder")
+    require_connection()
+
+    st.write(
+        "Apply inclusion and exclusion criteria to a cohort with observed "
+        "follow-up, and see the Kaplan-Meier curve for who is left. Required "
+        "columns: `age`, `sex`, `baseline_risk_score`, `comorbidity_count`, "
+        "`observed_time_days`, `event_observed`."
+    )
+
+    frame = load_cohort_file("Cohort with follow-up (CSV)", "builder_upload")
+    if frame is None:
+        return
+
+    st.dataframe(frame.head(), use_container_width=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        min_age, max_age = st.slider("Include ages", 0, 120, (18, 90))
+    with col2:
+        horizon = st.number_input("Follow-up horizon (days)", min_value=1, value=1825)
+
+    exclude_field = st.selectbox(
+        "Exclude on (optional)", ["(none)"] + list(frame.columns))
+    exclude_value = None
+    if exclude_field != "(none)":
+        exclude_value = st.selectbox(
+            f"Exclude rows where {exclude_field} equals",
+            sorted(frame[exclude_field].astype(str).unique()))
+
+    if not st.button("Build cohort"):
+        return
+
+    try:
+        patients = frame_to_patient_records(frame)
+    except CohortValidationError as exc:
+        st.error(str(exc))
+        return
+
+    criteria = {"inclusion": {"age": [min_age, max_age]}, "exclusion": {}}
+    if exclude_value is not None:
+        criteria["exclusion"][exclude_field] = exclude_value
+
+    result = call_api("POST", "/api/outcomes/cohort", json={
+        "cohort_id": "ui_cohort", "name": "Cohort from upload",
+        "patients": patients, "criteria": criteria,
+        "follow_up_period_days": int(horizon),
+    })
+    if result is None:
+        return
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Supplied", result["supplied"])
+    col2.metric("Met criteria", result["size"])
+    col3.metric("Excluded", result["excluded_by_criteria"])
+
+    survival = result["survival"]
+    fig = go.Figure()
+    lower = [ci[0] for ci in survival["confidence_intervals"]]
+    upper = [ci[1] for ci in survival["confidence_intervals"]]
+    # Greenwood band, drawn: it widens as the risk set shrinks, and a curve
+    # shown without it invites reading the tail as firmly as the head.
+    fig.add_trace(go.Scatter(
+        x=survival["time_points"] + survival["time_points"][::-1],
+        y=upper + lower[::-1], fill="toself", fillcolor="rgba(31,119,180,0.15)",
+        line=dict(color="rgba(0,0,0,0)"), name="95% CI", hoverinfo="skip"))
+    fig.add_trace(go.Scatter(
+        x=survival["time_points"], y=survival["survival_probabilities"],
+        mode="lines", line_shape="hv", line=dict(color="#1f77b4", width=3),
+        name="Survival"))
+    fig.update_layout(
+        title="Kaplan-Meier with Greenwood confidence band",
+        xaxis_title="Days", yaxis_title="Survival probability",
+        yaxis=dict(range=[0, 1]), template="plotly_white")
+    st.plotly_chart(fig, use_container_width=True)
+
+    median = survival["median_survival_days"]
+    st.write(
+        f"Events {survival['events']}, censored {survival['censored']}, "
+        f"median survival "
+        f"**{f'{median:.0f} days' if median is not None else 'not reached'}**"
+    )
+
+
+def page_comparative_effectiveness():
+    st.header("⚖️ Comparative Effectiveness")
+    require_connection()
+
+    st.write(
+        "Compare treatment arms with a log-rank test. The file needs the "
+        "follow-up columns plus a column naming each patient's arm."
+    )
+    st.caption(
+        "Arm assignment has to come from the data. Inferring it here would "
+        "make the comparison a comparison of whatever rule did the inferring."
+    )
+
+    frame = load_cohort_file("Cohort with arms (CSV)", "ce_upload")
+    if frame is None:
+        return
+
+    st.dataframe(frame.head(), use_container_width=True)
+
+    arm_column = st.selectbox("Column naming the arm", list(frame.columns))
+    if not st.button("Compare arms"):
+        return
+
+    arms = frame[arm_column].astype(str).tolist()
+    if len(set(arms)) < 2:
+        st.error(f"`{arm_column}` has only one distinct value; nothing to compare.")
+        return
+
+    try:
+        patients = frame_to_patient_records(frame)
+    except CohortValidationError as exc:
+        st.error(str(exc))
+        return
+
+    result = call_api("POST", "/api/outcomes/comparative-effectiveness", json={
+        "cohort_id": "ui_ce", "patients": patients, "groups": arms,
+        "follow_up_period_days": 10_000,
+    })
+    if result is None:
+        return
+
+    rows = [
+        {"Arm": arm, "Patients": o["n_patients"], "Events": o["n_events"],
+         "Event rate": f"{o['event_rate']:.1%}",
+         "Median follow-up (days)": f"{o['median_survival']:.0f}"}
+        for arm, o in result["group_outcomes"].items()
+    ]
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric(result["test"], f"p = {result['p_value']:.4g}")
+    col2.metric("Test statistic", f"{result['test_statistic']:.2f}")
+    if result["number_needed_to_treat"] is not None:
+        col3.metric("NNT", f"{result['number_needed_to_treat']:.1f}")
+
+    # The p-value never appears without its denominators.
+    st.caption(
+        f"{result['degrees_of_freedom']} df · sizes {result['group_sizes']} · "
+        f"events {result['group_events']}"
+    )
+    for note in result["notes"]:
+        st.info(note)
+
+
+def page_causal_inference():
+    st.header("🎯 Treatment Effect")
+    require_connection()
+
+    st.write(
+        "Estimate an average treatment effect from observed assignments and "
+        "outcomes. The file needs the patient columns plus a treatment column "
+        "and an outcome column."
+    )
+
+    frame = load_cohort_file("Cohort with treatment and outcome (CSV)", "ate_upload")
+    if frame is None:
+        return
+
+    st.dataframe(frame.head(), use_container_width=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        treatment_column = st.selectbox("Treatment column", list(frame.columns))
+    with col2:
+        outcome_column = st.selectbox("Outcome column", list(frame.columns))
+
+    confounders = st.multiselect(
+        "Adjust for", ["age", "gender_encoded", "baseline_risk_score",
+                       "comorbidity_count"],
+        default=["age", "baseline_risk_score", "comorbidity_count"])
+
+    if not st.button("Estimate effect"):
+        return
+
+    try:
+        patients = frame_to_treatment_records(frame, treatment_column, outcome_column)
+    except CohortValidationError as exc:
+        st.error(str(exc))
+        return
+
+    result = call_api("POST", "/api/causal-inference/ate-estimation", json={
+        "patient_data": patients,
+        "treatment_variable": treatment_column,
+        "outcome_variable": outcome_column,
+        "confounders": confounders,
+    })
+    if result is None:
+        return
+
+    estimates = result["ate_estimates"]
+    columns = st.columns(len(estimates))
+    for column, (method, value) in zip(columns, estimates.items()):
+        column.metric(method.replace("ate_", "").replace("_", " ").title(),
+                      f"{value:.3f}")
+
+    cohort = result["cohort"]
+    st.caption(
+        f"{cohort['treated']} treated, {cohort['control']} control · "
+        f"adjusted for {', '.join(result['confounders_adjusted_for'])}"
+    )
+    if result["confounders_dropped_as_constant"]:
+        st.info("Dropped as constant: "
+                + ", ".join(result["confounders_dropped_as_constant"]))
+
+    # The unadjusted and adjusted numbers differing is the finding, so the
+    # caveat has to sit with them rather than in documentation somewhere.
+    st.warning(result["caveat"])
+
+
+def page_guidelines():
+    st.header("📋 Guidelines & Adherence")
+    require_connection()
+
+    registered = call_api("GET", "/api/pathways/guidelines")
+    if registered is None:
+        return
+    guidelines = registered["guidelines"]
+
+    register_tab, adherence_tab = st.tabs(["Register a guideline", "Score adherence"])
+
+    with register_tab:
+        st.write("Steps, one per line. Prefix with `?` to mark a step optional.")
+        with st.form("guideline_form"):
+            guideline_id = st.text_input("Guideline ID", "dm2_2026")
+            name = st.text_input("Name", "Type 2 Diabetes Management")
+            condition = st.text_input("Condition", "type 2 diabetes")
+            steps_text = st.text_area(
+                "Steps",
+                "\n".join([
+                    "HbA1c measurement",
+                    "Metformin initiation",
+                    "Retinal screening",
+                    "?Sulfonylurea add-on",
+                ]))
+            if st.form_submit_button("Register"):
+                steps = []
+                for line in filter(None, (l.strip() for l in steps_text.splitlines())):
+                    optional = line.startswith("?")
+                    steps.append({"name": line.lstrip("?").strip(),
+                                  "recommended": not optional})
+                result = call_api("POST", "/api/pathways/guidelines", json={
+                    "id": guideline_id, "name": name, "condition": condition,
+                    "steps": steps, "decision_points": [],
+                })
+                if result is not None:
+                    st.success(
+                        f"Registered `{result['guideline_id']}`: "
+                        f"{result['required_steps']} of {result['steps']} steps required")
+                    st.rerun()
+
+    with adherence_tab:
+        if not guidelines:
+            st.info("Register a guideline first.")
+            return
+
+        chosen = st.selectbox(
+            "Guideline", [g["id"] for g in guidelines],
+            format_func=lambda i: next(g["name"] for g in guidelines if g["id"] == i))
+        patient_id = st.text_input("Patient ID", "pt_1")
+        performed = st.text_area("Steps actually performed, one per line", "")
+
+        if st.button("Score adherence"):
+            result = call_api("POST", "/api/pathways/adherence", json={
+                "guideline_id": chosen, "patient_id": patient_id,
+                "condition": next(g["condition"] for g in guidelines if g["id"] == chosen),
+                "steps": [{"name": l.strip()}
+                          for l in performed.splitlines() if l.strip()],
+            })
+            if result is None:
+                return
+
+            comparison = result["comparison"]
+            score = comparison["adherence_score"]
+            # Always with its denominator: 2/3 and 200/300 are the same
+            # number and very different evidence.
+            st.metric(
+                "Adherence", f"{score:.0%}",
+                f"{comparison['n_performed']} of {comparison['n_required']} required steps")
+
+            if comparison["missing_steps"]:
+                st.warning("Missing: " + ", ".join(comparison["missing_steps"]))
+            if comparison["extra_steps"]:
+                st.info("Not recommended: " + ", ".join(comparison["extra_steps"]))
+            for opportunity in result["opportunities"]:
+                st.write(
+                    f"**{opportunity['type']}** ({opportunity['priority']}): "
+                    f"{opportunity['description']} — {opportunity['suggestion']}")
+
+
+def page_guideline_evidence():
+    st.header("🔗 Evidence for a Guideline")
+    require_connection()
+
+    st.write(
+        "Each recommended step is used as a retrieval query against the "
+        "indexed corpus. This is where the evidence side and the pathway "
+        "side meet."
+    )
+
+    registered = call_api("GET", "/api/pathways/guidelines")
+    if registered is None:
+        return
+    guidelines = registered["guidelines"]
+    if not guidelines:
+        st.info("Register a guideline on the **Guidelines & Adherence** page first.")
+        return
+
+    chosen = st.selectbox(
+        "Guideline", [g["id"] for g in guidelines],
+        format_func=lambda i: next(g["name"] for g in guidelines if g["id"] == i))
+    per_step = st.slider("Records per step", 1, 10, 3)
+
+    if not st.button("Check evidence"):
+        return
+
+    result = call_api(
+        "GET", f"/api/pathways/guidelines/{chosen}/evidence",
+        params={"per_step": per_step})
+    if result is None:
+        return
+
+    unsupported = result["steps_with_no_evidence_in_corpus"]
+    if unsupported:
+        st.warning(
+            f"{len(unsupported)} of {result['steps_examined']} steps have no "
+            f"supporting record in the corpus: " + ", ".join(unsupported))
+    else:
+        st.success(f"All {result['steps_examined']} steps have supporting records.")
+
+    for finding in result["findings"]:
+        with st.expander(
+                f"{finding['step']} — {finding['supporting_records']} record(s)",
+                expanded=bool(finding["supporting_records"])):
+            st.caption(
+                f"query: “{finding['query']}” · mode: {finding['retrieval_mode']}")
+            if not finding["evidence"]:
+                st.write("No supporting record in the indexed corpus.")
+            for item in finding["evidence"]:
+                if item.get("url"):
+                    st.markdown(f"- [{item['citation']}]({item['url']}) {item['title']}")
+                else:
+                    st.markdown(f"- {item['citation']} {item['title']}")
+
+    # The distinction the whole endpoint exists to preserve.
+    st.info(result["note"])
+
+
 PAGES = {
     "Dashboard": page_dashboard,
     "Train Risk Model": page_train_risk_model,
     "Patient Risk Assessment": page_risk_assessment,
     "Survival Analysis": page_survival_analysis,
+    "Cohort Builder": page_cohort_builder,
+    "Comparative Effectiveness": page_comparative_effectiveness,
+    "Treatment Effect": page_causal_inference,
+    "Guidelines & Adherence": page_guidelines,
+    "Evidence for a Guideline": page_guideline_evidence,
     "Evidence Search": page_evidence_search,
     "Cohort Analysis": page_cohort_analysis,
 }
