@@ -6,6 +6,7 @@ on:
   pull_request:
 
 jobs:
+  # Fast feedback: everything that needs nothing but a virtualenv.
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -30,8 +31,8 @@ jobs:
           pip install -e '.[dev]'
 
       - name: Run tests
-        # No network access in CI: the PubMed fetchers are driven with a fake
-        # aiohttp session and the evidence searcher is dependency-overridden.
+        # The `requires_stack` tests skip here by design -- this job has no
+        # backing services. They run in the `integration` job below.
         run: python -m pytest -q --cov=src --cov-report=term-missing
 
       - name: Fail if any known defect was silently fixed
@@ -39,3 +40,71 @@ jobs:
         # hard failure -- the signal to drop the marker. This step makes that
         # visible as its own line rather than buried in the run above.
         run: python -m pytest -m known_defect -q
+
+  # The ten retrieval tests that need real Neo4j, OpenSearch and Qdrant.
+  #
+  # Brings the stack up with the project's own docker-compose.yml rather than
+  # redeclaring the services as GitHub service containers: one definition,
+  # the same command a developer runs, and no second copy to drift.
+  integration:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install -e '.[dev,graph]'
+
+      - name: Start Neo4j, OpenSearch and Qdrant
+        run: docker compose up -d
+
+      - name: Wait for the stack
+        run: |
+          deadline=$((SECONDS + 180))
+          while (( SECONDS < deadline )); do
+            neo4j=$(curl -fsS -o /dev/null -w '%{http_code}' http://localhost:7474/ 2>/dev/null || echo 000)
+            opensearch=$(curl -fsS -o /dev/null -w '%{http_code}' http://localhost:9200/_cluster/health 2>/dev/null || echo 000)
+            qdrant=$(curl -fsS -o /dev/null -w '%{http_code}' http://localhost:6343/readyz 2>/dev/null || echo 000)
+            if [[ "$neo4j$opensearch$qdrant" == "200200200" ]]; then
+              echo "stack ready after ${SECONDS}s"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "stack not ready within 180s (neo4j=$neo4j opensearch=$opensearch qdrant=$qdrant)" >&2
+          docker compose logs --tail 40
+          exit 1
+
+      - name: Run the integration tests
+        # Not `-m requires_stack`: with the stack up these must not skip.
+        # A skipped integration test reports green while proving nothing,
+        # so the run is failed if any of them skips.
+        # pipefail matters: without it `tee` returns 0 and a failing test
+        # run is reported as a passing step.
+        run: |
+          set -o pipefail
+          python -m pytest -m requires_stack -q -rs --no-header | tee result.txt
+
+      - name: Fail if any integration test skipped
+        run: |
+          if grep -qE '[0-9]+ skipped' result.txt; then
+            echo "An integration test skipped while the stack was up." >&2
+            grep -E 'SKIPPED' result.txt >&2 || true
+            exit 1
+          fi
+
+      - name: Stack logs on failure
+        if: failure()
+        run: docker compose logs --tail 100
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

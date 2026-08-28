@@ -180,11 +180,35 @@ def display_cox_results(cox_data: Dict):
         )
 
 
+MODE_LABELS = {
+    "index": "🗂️ Indexed corpus (BM25 + vector + graph)",
+    "live": "🌐 Live PubMed / ClinicalTrials.gov",
+    "index_then_live": "🌐 Live — the indexed corpus had no match",
+}
+
+
 def display_evidence_results(evidence_data: Dict):
     results = evidence_data["results"]
+    mode = evidence_data.get("retrieval_mode", "live")
+
+    # Where the results came from is shown before the results themselves:
+    # "our corpus does not cover this" and "the literature does not cover
+    # this" look identical once you are reading the list.
+    st.caption(f"Source: {MODE_LABELS.get(mode, mode)}")
+    if mode == "index_then_live":
+        st.info(evidence_data.get("note", ""))
+
     if not results:
-        st.info(f"No evidence found for “{evidence_data['query']}”.")
+        st.warning(
+            f"No evidence found for “{evidence_data['query']}” in the "
+            f"indexed corpus or upstream."
+        )
         return
+
+    if evidence_data.get("graph_context"):
+        entities = sorted({row["entity"] for row in evidence_data["graph_context"]})
+        with st.expander(f"Graph context ({len(entities)} entities)"):
+            st.write(", ".join(entities))
 
     st.caption(f"{evidence_data['total_results']} result(s)")
     for evidence in results:
@@ -208,6 +232,13 @@ def display_evidence_results(evidence_data: Dict):
                 st.write(evidence["abstract"])
             if evidence.get("mesh_terms"):
                 st.write("**MeSH terms:** " + ", ".join(evidence["mesh_terms"]))
+            if evidence.get("found_by"):
+                # The fused ranking, made inspectable: which retrievers
+                # surfaced this result and at what rank.
+                found = ", ".join(
+                    f"{name} #{rank}" for name, rank in sorted(evidence["found_by"].items()))
+                st.caption(f"Retrieved by {found} · fused score "
+                           f"{evidence.get('fused_score', 0):.4f}")
             st.divider()
 
 

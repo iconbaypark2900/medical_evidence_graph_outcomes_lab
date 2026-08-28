@@ -21,6 +21,8 @@ import numpy as np
 import pytest
 
 from src.graph_rag_service.main import (
+    BM25_MINIMUM_SHOULD_MATCH,
+    MIN_VECTOR_SIMILARITY,
     RRF_K,
     FusedResult,
     GraphRAGService,
@@ -221,10 +223,15 @@ class StubQdrant:
         self.points = points or []
         self.error = error
 
-    def query_points(self, collection_name, query, limit, with_payload):
+    def query_points(self, collection_name, query, limit, with_payload,
+                     score_threshold=None):
         if self.error:
             raise self.error
-        return StubQdrantResponse(self.points[:limit])
+        self.score_threshold = score_threshold
+        points = self.points
+        if score_threshold is not None:
+            points = [p for p in points if p.score >= score_threshold]
+        return StubQdrantResponse(points[:limit])
 
 
 class StubEmbedder:
@@ -433,3 +440,91 @@ async def test_reindexing_the_same_document_updates_rather_than_duplicates(index
     await store.close()
 
     assert after == before
+
+
+# --------------------------------------------------------------------------
+# Relevance floors
+#
+# Neither retriever says "nothing matches" on its own. Vector search
+# returns the k nearest neighbours however far away they are, and a
+# multi_match ORs its terms so a stopword in common is a hit. Without a
+# floor, a query the corpus does not cover comes back with a full page of
+# confident-looking results.
+# --------------------------------------------------------------------------
+
+def test_weak_vector_hits_are_dropped(service):
+    service.qdrant_client = StubQdrant([
+        StubQdrantPoint("relevant", 0.72), StubQdrantPoint("noise", 0.11)])
+    service.embedding_model = StubEmbedder()
+
+    results = service.run_vector_search("heart failure", limit=5)
+
+    assert [r.id for r in results] == ["relevant"]
+
+
+def test_the_similarity_floor_is_passed_to_the_engine(service):
+    """Filtered server-side, so the limit applies after the cut."""
+    service.qdrant_client = StubQdrant([StubQdrantPoint("a", 0.9)])
+    service.embedding_model = StubEmbedder()
+
+    service.run_vector_search("heart failure", limit=5)
+
+    assert service.qdrant_client.score_threshold == MIN_VECTOR_SIMILARITY
+
+
+def test_the_similarity_floor_is_overridable(service):
+    service.qdrant_client = StubQdrant([StubQdrantPoint("borderline", 0.20)])
+    service.embedding_model = StubEmbedder()
+
+    assert service.run_vector_search("q", 5) == []
+    assert len(service.run_vector_search("q", 5, min_similarity=0.1)) == 1
+
+
+def test_the_floor_sits_between_relevant_and_nonsense_scores():
+    """Measured on this corpus: relevant queries score 0.56-0.79, nonsense
+    tops out near 0.19. The floor has to separate those."""
+    assert 0.19 < MIN_VECTOR_SIMILARITY < 0.56
+
+
+def test_bm25_requires_a_meaningful_share_of_the_query_terms(service):
+    service.opensearch_client = StubOpenSearch([])
+
+    service.run_bm25_search("the quick brown fox", limit=5)
+
+    query = service.opensearch_client.last_body["query"]["multi_match"]
+    assert query["minimum_should_match"] == BM25_MINIMUM_SHOULD_MATCH
+
+
+@pytest.mark.requires_stack
+async def test_an_uncovered_query_returns_nothing_and_says_so(indexed_stack):
+    """The honest failure. Returning the nearest three papers to a query
+    about quantum chromodynamics would be indistinguishable from a match."""
+    answer = await indexed_stack.answer_query(
+        "quantum chromodynamics lattice gauge theory", limit=3)
+
+    assert answer.results == []
+    assert answer.coverage["matched"] is False
+    assert "does not cover it" in answer.coverage["note"]
+    assert "not a statement about the literature" in answer.coverage["note"]
+
+
+@pytest.mark.requires_stack
+async def test_a_covered_query_still_matches(indexed_stack):
+    answer = await indexed_stack.answer_query("heart failure", limit=3)
+
+    assert answer.results
+    assert answer.coverage["matched"] is True
+
+
+@pytest.mark.requires_stack
+async def test_a_paraphrase_matches_semantically_with_no_lexical_overlap(indexed_stack):
+    """The capability the np.random.rand(32) mock could not have had.
+
+    None of these terms appear in the indexed abstracts, and BM25 finds
+    nothing; vector search still retrieves the right papers.
+    """
+    query = "SGLT2 drug preventing cardiac decompensation admissions"
+
+    assert indexed_stack.run_bm25_search(query, limit=5) == []
+    semantic = [r.id for r in indexed_stack.run_vector_search(query, limit=3)]
+    assert set(semantic) & {"t_hf_dapa", "t_hf_empa"}, semantic

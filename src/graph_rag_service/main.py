@@ -49,6 +49,20 @@ logger = logging.getLogger(__name__)
 # dominating the fused ranking on its own.
 RRF_K = 60
 
+# Cosine similarity below which a vector hit is not treated as a match.
+#
+# Vector search has no natural cutoff: it returns the k nearest neighbours
+# however far away they are, so an unrelated query still gets a full page
+# of confident-looking results. Measured against this corpus with
+# all-MiniLM-L6-v2, genuinely relevant queries score 0.56-0.79 while
+# nonsense queries top out around 0.19, so anything below this is noise.
+MIN_VECTOR_SIMILARITY = 0.35
+
+# A query only matches lexically if enough of its terms hit. Without this,
+# multi_match ORs the terms and "the quick brown fox" matches every
+# document containing "the".
+BM25_MINIMUM_SHOULD_MATCH = "2<70%"
+
 
 class RetrievalError(RuntimeError):
     """A retriever failed. Never reported as an empty result set."""
@@ -226,6 +240,8 @@ class GraphRAGService:
                             # Title matches weigh more than body matches.
                             "fields": ["title^2", "content", "mesh_terms",
                                        "conditions", "interventions", "outcomes"],
+                            # Otherwise a stopword in common is a match.
+                            "minimum_should_match": BM25_MINIMUM_SHOULD_MATCH,
                         }
                     },
                 },
@@ -253,8 +269,14 @@ class GraphRAGService:
             for hit in response["hits"]["hits"]
         ]
 
-    def run_vector_search(self, query: str, limit: int = 10) -> List[SearchResult]:
-        """Semantic retrieval. Finds paraphrases BM25 misses."""
+    def run_vector_search(self, query: str, limit: int = 10,
+                          min_similarity: float = MIN_VECTOR_SIMILARITY) -> List[SearchResult]:
+        """Semantic retrieval. Finds paraphrases BM25 misses.
+
+        Hits below `min_similarity` are dropped. Without a floor, a query
+        the corpus does not cover still returns its k nearest neighbours,
+        and nothing in the response distinguishes those from real matches.
+        """
         try:
             vector = self.embedding_model.encode(query)
             hits = self.qdrant_client.query_points(
@@ -262,6 +284,7 @@ class GraphRAGService:
                 query=[float(v) for v in vector],
                 limit=limit,
                 with_payload=True,
+                score_threshold=min_similarity,
             ).points
         except Exception as e:
             raise RetrievalError(f"Vector search failed for {query!r}: {e}") from e
@@ -379,6 +402,7 @@ class GraphRAGService:
 
         fused = reciprocal_rank_fusion(ranked_lists)[:limit]
         graph_context = await self.graph_context_for([r.id for r in fused])
+        matched = any(ranked_lists.values())
 
         # How many retrievers found each returned document. Agreement
         # across independent retrievers is worth surfacing; it is not a
@@ -398,10 +422,15 @@ class GraphRAGService:
                 "retrievers_agreeing_on_top_result": agreement[0] if agreement else 0,
                 "mean_retriever_agreement": (
                     sum(agreement) / len(agreement) if agreement else 0.0),
+                "matched": matched,
                 "note": (
                     "Agreement counts how many retrievers independently "
                     "surfaced each result. It measures retrieval consensus, "
                     "not whether the evidence answers the question."
+                    if matched else
+                    "No retriever matched this query above its relevance "
+                    "floor. The indexed corpus does not cover it; that is "
+                    "not a statement about the literature."
                 ),
             },
         )

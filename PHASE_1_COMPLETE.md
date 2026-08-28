@@ -1,5 +1,13 @@
 # Phase 1: Infrastructure & Data Integration Complete
 
+> **Note (2026-08-28).** The files this document tells you to run have been
+> removed. `src/mock_databases_test.py` and `src/mock_integration_test.py`
+> faked Neo4j, OpenSearch and Qdrant; `docker compose up -d` now provides
+> the real ones, and `pytest -m requires_stack` exercises them.
+> `src/db_connection_test.py` held a `DatabaseManager` that
+> `src/integration.py` supersedes, and `verify_phase1.py` only drove the
+> two mock modules. See [`tests/README.md`](tests/README.md).
+
 ## Overview
 Phase 1 of the Medical Evidence Graph & Outcomes Insight Lab has been successfully completed. This phase focused on setting up the infrastructure and establishing real database connections with actual medical evidence ingestion.
 

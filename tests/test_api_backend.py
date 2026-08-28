@@ -15,6 +15,8 @@ from fastapi.testclient import TestClient
 
 from src.api_backend import (
     EvidenceSearcher,
+    EvidenceSearchResponse,
+    GraphRAGEvidenceSearcher,
     app,
     get_evidence_searcher,
     median_survival_time,
@@ -670,16 +672,18 @@ def test_cohort_comparison_warns_about_multiple_comparisons(client):
 # --------------------------------------------------------------------------
 
 class StubSearcher(EvidenceSearcher):
-    def __init__(self, results=None, error=None):
+    def __init__(self, results=None, error=None, mode="live"):
         self.results = results or []
         self.error = error
+        self.mode = mode
         self.calls = []
 
     async def search(self, query, limit):
         self.calls.append((query, limit))
         if self.error:
             raise self.error
-        return self.results[:limit]
+        return EvidenceSearchResponse(
+            results=self.results[:limit], mode=self.mode, note="stub")
 
 
 @pytest.fixture
@@ -701,6 +705,18 @@ ARTICLE = {
     "mesh_terms": ["Heart Failure"],
     "url": "https://pubmed.ncbi.nlm.nih.gov/31234567/",
 }
+
+
+def test_evidence_search_reports_which_mode_produced_the_results(client, stub_searcher):
+    """"Not in our corpus" and "not in the literature" are different
+    claims; the payload has to distinguish them."""
+    stub_searcher.results = [ARTICLE]
+    stub_searcher.mode = "index"
+
+    body = client.get("/api/evidence/search", params={"query": "heart failure"}).json()
+
+    assert body["retrieval_mode"] == "index"
+    assert "graph_context" in body
 
 
 def test_evidence_search_returns_what_the_searcher_found(client, stub_searcher):
@@ -765,3 +781,112 @@ def test_evidence_search_surfaces_an_upstream_failure(client, stub_searcher):
 
     assert response.status_code == 502
     assert "429" in response.json()["detail"]
+
+
+# --------------------------------------------------------------------------
+# Graph-RAG backed search
+# --------------------------------------------------------------------------
+
+class StubFused:
+    def __init__(self, doc_id, title, pmid=None):
+        self.id = doc_id
+        self.title = title
+        self.content = f"Abstract of {doc_id}"
+        self.source = "PubMed"
+        self.citation = f"PMID:{pmid}" if pmid else doc_id
+        self.fused_score = 0.05
+        self.found_by = {"bm25": 1, "vector": 2}
+        self.metadata = {"pmid": pmid, "journal": "NEJM", "pub_date": "2019"}
+
+
+class StubAnswer:
+    def __init__(self, results, graph_context=None):
+        self.results = results
+        self.graph_context = graph_context or []
+        self.coverage = {"note": "retrieval consensus, not correctness"}
+
+
+class StubRagService:
+    def __init__(self, answer):
+        self.answer = answer
+        self.queries = []
+
+    async def answer_query(self, query, limit):
+        self.queries.append((query, limit))
+        return self.answer
+
+
+class StubLive(EvidenceSearcher):
+    def __init__(self, results):
+        self.results = results
+        self.fetched = []
+
+    async def fetch(self, query, limit):
+        self.fetched.append((query, limit))
+        return self.results
+
+
+async def test_graph_rag_search_uses_the_index_and_reports_graph_context():
+    """The whole point of indexing: search the local corpus, not PubMed."""
+    service = StubRagService(StubAnswer(
+        [StubFused("pubmed_1", "Dapagliflozin in heart failure", pmid="31234567")],
+        graph_context=[{"entity": "Heart Failure", "entity_type": "Condition"}],
+    ))
+    live = StubLive([{"id": "should_not_be_used"}])
+
+    response = await GraphRAGEvidenceSearcher(service, live).search("heart failure", 5)
+
+    assert response.mode == "index"
+    assert response.results[0]["citation"] == "PMID:31234567"
+    assert response.graph_context[0]["entity"] == "Heart Failure"
+    assert live.fetched == [], "live retrieval should not run when the index answers"
+
+
+async def test_graph_rag_results_expose_how_they_were_ranked():
+    """A fused ranking a reader cannot inspect is a black box."""
+    service = StubRagService(StubAnswer([StubFused("pubmed_1", "T", pmid="1")]))
+
+    response = await GraphRAGEvidenceSearcher(service, StubLive([])).search("hf", 5)
+
+    assert response.results[0]["found_by"] == {"bm25": 1, "vector": 2}
+    assert response.results[0]["fused_score"] == 0.05
+
+
+async def test_an_empty_index_falls_back_to_live_and_says_so():
+    """Silently blending the two would let "our corpus lacks this" pass as
+    "the literature lacks this"."""
+    service = StubRagService(StubAnswer([]))
+    live = StubLive([{"id": "pubmed_99", "title": "Found live"}])
+
+    response = await GraphRAGEvidenceSearcher(service, live).search("rare disease", 5)
+
+    assert response.mode == "index_then_live"
+    assert response.results == [{"id": "pubmed_99", "title": "Found live"}]
+    assert "not absence from the literature" in response.note
+    assert live.fetched == [("rare disease", 5)]
+
+
+async def test_the_fallback_does_not_write_to_the_index():
+    """Ingesting on read would let the corpus reshape itself around
+    whatever people happen to search for."""
+    service = StubRagService(StubAnswer([]))
+
+    await GraphRAGEvidenceSearcher(service, StubLive([])).search("rare disease", 5)
+
+    assert not hasattr(service, "stored")
+
+
+async def test_the_searcher_degrades_to_live_when_the_stack_is_down(monkeypatch):
+    """A missing docker-compose stack must not take the API down with it."""
+    import src.api_backend as backend
+
+    class Boom:
+        def __init__(self, *a, **k):
+            raise ConnectionError("Cannot reach Neo4j")
+
+    monkeypatch.setattr(
+        "src.graph_rag_service.main.GraphRAGService", Boom, raising=True)
+
+    searcher = await backend.build_evidence_searcher()
+
+    assert isinstance(searcher, backend.LiteratureEvidenceSearcher)

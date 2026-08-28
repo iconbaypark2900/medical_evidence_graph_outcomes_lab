@@ -69,7 +69,8 @@ The Medical Evidence Graph & Outcomes Insight Lab is a sophisticated platform de
 | Evidence graph service | link suggestion working (Adamic-Adar over the real graph); **KGE embeddings not implemented** — `recompute_kge_features` raises rather than returning random vectors |
 | Evidence storage (Neo4j + OpenSearch + Qdrant) | working — `src/integration.py` indexes into all three |
 | Graph-RAG hybrid retrieval | working — BM25 + vector + graph traversal, fused, with citations |
-| Pathway & guideline service | not exercised |
+| Evidence search API + frontend | working — served from the index, with a labelled live fallback |
+| Pathway & guideline service | working — adherence against a guideline, with tests |
 | Vault / OPA / Presidio / MLflow / Langfuse | not integrated |
 
 ## Setup

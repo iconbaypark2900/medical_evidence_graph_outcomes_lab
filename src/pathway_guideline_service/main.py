@@ -154,8 +154,18 @@ class PathwayGuidelineService:
         recommended_step_names = {node['name'] for node in recommended if node['type'] != 'decision'}
         observed_step_names = {step['name'] for step in observed}
         
-        # Steps that should have been performed according to guideline
-        required_steps = {node['name'] for node in recommended if node['recommended']}
+        # Steps that should have been performed according to guideline.
+        #
+        # Decision nodes are excluded before the lookup, as they are two
+        # lines above: they are questions, not care steps, and they are
+        # built without a 'recommended' key. Indexing it directly raised
+        # KeyError on any guideline containing a decision point -- which
+        # this service's own sample guideline does, so the central
+        # comparison has never completed on it.
+        required_steps = {
+            node['name'] for node in recommended
+            if node['type'] != 'decision' and node.get('recommended', True)
+        }
         
         # Steps that were actually performed
         performed_steps = observed_step_names.intersection(recommended_step_names)

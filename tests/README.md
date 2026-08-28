@@ -12,8 +12,13 @@ Qdrant); they **skip** with an explanatory message when those are not
 reachable, so the default suite runs with nothing but a venv:
 
 ```bash
-.venv/bin/python -m pytest -m requires_stack   # the 10 integration tests
+.venv/bin/python -m pytest -m requires_stack   # the 13 integration tests
 ```
+
+CI runs both halves: one job without the stack (where these skip by
+design) and one that brings up `docker-compose.yml` and runs them for
+real. That second job fails if any of them *skips* — an integration test
+that quietly skips reports green while proving nothing.
 
 Those ten are the ones that prove retrieval works against the real
 stores rather than against fakes — including that vector search matches a
@@ -78,22 +83,14 @@ The suite opened with 18 of these and now has none: all 18 were fixed, and
 each marker was removed as its test flipped. Nothing here is skipped or
 silently tolerated.
 
-## What is deliberately not collected
+## Everything under src/ is now real
 
-`pyproject.toml` sets `testpaths = ["tests"]`. Four modules under `src/`
-have test-shaped names but are not tests, and would execute on import:
-
-| File | What it actually is |
-|---|---|
-| `src/test_cox_simple.py` | Debug script; fits a Cox model and prints. |
-| `src/debug_cox_data.py` | Debug script; prints dtypes of synthetic data. |
-| `src/mock_databases_test.py` | In-memory Neo4j/OpenSearch/Qdrant fakes. |
-| `src/mock_integration_test.py` | Phase-1 demo; re-declares those fakes inline. |
-| `src/db_connection_test.py` | The `DatabaseManager` class — production code. |
-
-The ground the first two explored is now covered by
-`test_survival_analysis.py`, against known ground truth rather than printed
-output.
+`pyproject.toml` sets `testpaths = ["tests"]`. It used to also have to
+work around five modules under `src/` with test-shaped names that were
+not tests — mock database implementations, debug scratch, and one
+production class called `db_connection_test.py`. All five are gone, along
+with `verify_phase1.py`, which existed only to drive the mocks. The real
+stores replaced what they stood in for.
 
 ## Adding a test
 

@@ -17,6 +17,9 @@ score needs a model that was fitted on labelled data beforehand. Where
 that input is absent the request is rejected (422) or the service
 reports that it is not ready (503).
 """
+import asyncio
+from dataclasses import dataclass, field
+
 from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -282,10 +285,24 @@ feature_builder = EnhancedOutcomeModels()
 # Evidence search
 # ---------------------------------------------------------------------------
 
+@dataclass
+class EvidenceSearchResponse:
+    """What a search returned, and where it came from.
+
+    `mode` is part of the payload because "our indexed corpus does not
+    cover this" and "the literature does not cover this" are different
+    claims, and a caller cannot tell them apart from the results alone.
+    """
+    results: List[Dict[str, Any]]
+    mode: str  # "index" | "live" | "index_then_live"
+    graph_context: List[Dict[str, Any]] = field(default_factory=list)
+    note: str = ""
+
+
 class EvidenceSearcher:
     """Retrieves evidence. Overridden in tests via FastAPI dependencies."""
 
-    async def search(self, query: str, limit: int) -> List[Dict[str, Any]]:
+    async def search(self, query: str, limit: int) -> EvidenceSearchResponse:
         raise NotImplementedError
 
 
@@ -296,7 +313,16 @@ class LiteratureEvidenceSearcher(EvidenceSearcher):
     — the query echoed back with a relevance score attached.
     """
 
-    async def search(self, query: str, limit: int) -> List[Dict[str, Any]]:
+    async def search(self, query: str, limit: int) -> EvidenceSearchResponse:
+        return EvidenceSearchResponse(
+            results=await self.fetch(query, limit),
+            mode="live",
+            note=("Retrieved live from PubMed and ClinicalTrials.gov. These "
+                  "results are not in the local index and carry no graph "
+                  "context."),
+        )
+
+    async def fetch(self, query: str, limit: int) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
 
         async with PubMedFetcher() as pubmed:
@@ -336,8 +362,110 @@ class LiteratureEvidenceSearcher(EvidenceSearcher):
         return results[:limit]
 
 
-def get_evidence_searcher() -> EvidenceSearcher:
-    return LiteratureEvidenceSearcher()
+class GraphRAGEvidenceSearcher(EvidenceSearcher):
+    """Hybrid retrieval over the indexed corpus, with a labelled fallback.
+
+    Searches the local index first: BM25 + vector + graph traversal, fused,
+    with the graph context behind each hit. That is the point of indexing
+    — before this, every search was a live round trip to PubMed on the hot
+    path, subject to the rate limiter, and the indexed corpus was never
+    read.
+
+    When the index has nothing, it falls back to live retrieval and says
+    so in `mode`, rather than blending the two silently. It does not
+    ingest what it finds: writing to the corpus as a side effect of a read
+    would mean the index quietly reshapes itself around whatever people
+    happen to search for.
+    """
+
+    def __init__(self, service: Any, fallback: EvidenceSearcher):
+        self.service = service
+        self.fallback = fallback
+
+    async def search(self, query: str, limit: int) -> EvidenceSearchResponse:
+        answer = await self.service.answer_query(query, limit=limit)
+
+        if not answer.results:
+            live = await self.fallback.fetch(query, limit)
+            return EvidenceSearchResponse(
+                results=live,
+                mode="index_then_live",
+                note=("The indexed corpus returned nothing for this query; "
+                      "these results came from a live search instead. "
+                      "Absence from the index is not absence from the "
+                      "literature."),
+            )
+
+        return EvidenceSearchResponse(
+            results=[{
+                "id": result.id,
+                "title": result.title,
+                "abstract": result.content,
+                "source": result.source,
+                "citation": result.citation,
+                "pub_date": result.metadata.get("pub_date", ""),
+                "journal": result.metadata.get("journal", ""),
+                "authors": [],
+                "mesh_terms": [],
+                "url": _url_for(result),
+                # How this result was found, so the ranking is inspectable.
+                "found_by": result.found_by,
+                "fused_score": result.fused_score,
+            } for result in answer.results],
+            mode="index",
+            graph_context=answer.graph_context,
+            note=answer.coverage["note"],
+        )
+
+
+def _url_for(result: Any) -> str:
+    pmid = result.metadata.get("pmid")
+    nct_id = result.metadata.get("nct_id")
+    if pmid:
+        return f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+    if nct_id:
+        return f"https://clinicaltrials.gov/study/{nct_id}"
+    return ""
+
+
+_evidence_searcher: Optional[EvidenceSearcher] = None
+_searcher_lock = asyncio.Lock()
+
+
+async def build_evidence_searcher() -> EvidenceSearcher:
+    """Prefer the indexed corpus; fall back to live retrieval.
+
+    The graph stack is an optional extra, so its import is deferred: the
+    analysis API, the risk models and the frontend all work without
+    neo4j/qdrant/sentence-transformers installed.
+    """
+    live = LiteratureEvidenceSearcher()
+    try:
+        from src.graph_rag_service.main import GraphRAGService
+
+        service = GraphRAGService()
+        await service.connect()
+    except Exception as e:
+        # Not an error: retrieval degrades to live search, and every
+        # response says which mode produced it.
+        logger.warning(
+            f"Graph-RAG unavailable ({e}); evidence search will use live "
+            f"retrieval. Run `docker compose up -d` and index a corpus to "
+            f"search locally.")
+        return live
+
+    logger.info("Evidence search backed by the indexed corpus (graph-RAG)")
+    return GraphRAGEvidenceSearcher(service, live)
+
+
+async def get_evidence_searcher() -> EvidenceSearcher:
+    """Built once per process: connecting loads an embedding model."""
+    global _evidence_searcher
+    if _evidence_searcher is None:
+        async with _searcher_lock:
+            if _evidence_searcher is None:
+                _evidence_searcher = await build_evidence_searcher()
+    return _evidence_searcher
 
 
 # ---------------------------------------------------------------------------
@@ -847,7 +975,7 @@ async def search_evidence(
         raise HTTPException(status_code=400, detail="Invalid JSON in filters parameter")
 
     try:
-        results = await searcher.search(query, limit)
+        response = await searcher.search(query, limit)
     except RuntimeError as e:
         # An upstream failure is reported as one. Returning [] here would be
         # read as "no evidence exists for this query".
@@ -858,8 +986,11 @@ async def search_evidence(
         "status": "success",
         "query": query,
         "filters": parsed_filters,
-        "results": results,
-        "total_results": len(results),
+        "results": response.results,
+        "total_results": len(response.results),
+        "retrieval_mode": response.mode,
+        "graph_context": response.graph_context,
+        "note": response.note,
     }
 
 
