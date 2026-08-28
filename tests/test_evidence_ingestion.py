@@ -198,3 +198,69 @@ async def test_the_full_pipeline_runs_end_to_end():
     assert len(result["records"]) == 2
     assert result["records"][0]["ontology_mappings"]["mesh_terms"]
     assert result["event"]["delivered"] is False
+
+
+# --------------------------------------------------------------------------
+# Curated entities take precedence over keyword matching
+# --------------------------------------------------------------------------
+
+CURATED = MedicalEvidence(
+    id="pubmed_1", title="Dapagliflozin in heart failure",
+    abstract="A trial of therapy and treatment for diabetes outcomes.",
+    pub_date="2019", authors=[], journal="NEJM", source="PubMed", pmid="1",
+    mesh_terms=["Heart Failure"],
+    entities={
+        "conditions": ["Heart Failure"],
+        "interventions": ["dapagliflozin"],
+        "outcomes": ["mortality"],
+        "populations": ["Humans", "Aged"],
+    },
+    publication_types=["Randomized Controlled Trial"],
+)
+
+
+def test_curated_entities_are_used_verbatim():
+    """The abstract contains "therapy", "treatment", "diabetes" and
+    "outcomes" -- exactly the words the regex matcher would file as
+    entities. With curated axes present it must not run at all."""
+    entities = service_returning()._entities_for(CURATED)
+
+    assert entities["interventions"] == ["dapagliflozin"]
+    assert entities["outcomes"] == ["mortality"]
+    assert entities["populations"] == ["Humans", "Aged"]
+    assert "treatment" not in entities["interventions"]
+    assert "therapy" not in entities["interventions"]
+    assert "outcome" not in entities["outcomes"]
+
+
+def test_keyword_matching_is_the_fallback_not_the_default():
+    """A record with no indexed entities still yields something, coarse."""
+    uncurated = MedicalEvidence(
+        id="pubmed_2", title="A study of metformin",
+        abstract="Metformin therapy in diabetes reduced mortality.",
+        pub_date="2020", authors=[], journal="J", source="PubMed", pmid="2",
+        entities={},
+    )
+
+    entities = service_returning()._entities_for(uncurated)
+
+    assert "metformin" in entities["interventions"]
+    assert "diabetes" in entities["conditions"]
+
+
+def test_a_record_with_neither_curated_entities_nor_text_is_empty():
+    bare = MedicalEvidence(
+        id="pubmed_3", title="", abstract="", pub_date="2020",
+        authors=[], journal="J", source="PubMed", pmid="3", entities={})
+
+    entities = service_returning()._entities_for(bare)
+
+    assert all(entities[axis] == [] for axis in
+               ("conditions", "interventions", "outcomes", "populations"))
+
+
+def test_study_design_reaches_the_normalised_record():
+    records = service_returning().parse_normalize([CURATED])
+
+    assert records[0]["metadata"]["publication_types"] == [
+        "Randomized Controlled Trial"]

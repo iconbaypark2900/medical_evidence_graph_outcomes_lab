@@ -244,3 +244,36 @@ async def test_connecting_to_a_dead_host_raises(require_stack, tmp_path):
     with pytest.raises(StorageError, match="Cannot reach OpenSearch"):
         await store.connect()
     await store.close()
+
+
+# --------------------------------------------------------------------------
+# Graph node hygiene
+# --------------------------------------------------------------------------
+
+def test_publication_types_are_indexed():
+    """Study design is the strongest evidence-quality signal available."""
+    article = MedicalEvidence(
+        id="pubmed_1", title="T", abstract="A", pub_date="2019", authors=[],
+        journal="J", source="PubMed", pmid="1",
+        publication_types=["Randomized Controlled Trial"])
+
+    assert evidence_to_document(article)["publication_types"] == [
+        "Randomized Controlled Trial"]
+
+
+def test_a_sentence_long_entity_is_kept_out_of_the_graph():
+    """ClinicalTrials.gov primary outcome measures are free text and often
+    a whole sentence, unique per trial by construction. The graph
+    retriever ranks by SHARED entities, so a node nothing can match adds
+    weight and no signal. It stays searchable in OpenSearch.
+    """
+    from src.integration import MAX_ENTITY_NODE_LENGTH
+
+    sentence = (
+        "Prevention of COVID-19 Complications or Death: During the 30-day "
+        "Treatment Period, Time to First Occurrence of New/Worsened Organ "
+        "Dysfunction During Index Hospitalization")
+
+    assert len(sentence) > MAX_ENTITY_NODE_LENGTH
+    assert len("mortality") <= MAX_ENTITY_NODE_LENGTH
+    assert len("Sodium-Glucose Transporter 2 Inhibitors") <= MAX_ENTITY_NODE_LENGTH

@@ -99,17 +99,40 @@ class EvidenceIngestionService:
             item.entities = self._entities_for(item)
         return evidence
 
+    AXES = ("conditions", "interventions", "outcomes", "populations")
+
     def _entities_for(self, item: MedicalEvidence) -> Dict[str, List[str]]:
+        """Curated entities where they exist; keyword matching only as a
+        last resort.
+
+        PubMed and ClinicalTrials.gov both hand over indexed entities --
+        MeSH descriptors, ChemicalList substances, subheading qualifiers,
+        check tags, the registry's own condition and intervention fields.
+        Those are assigned by human indexers and are strictly better than
+        `extract_entities_from_text`, whose nine regexes put the words
+        "treatment", "therapy" and "outcome" into the graph as clinical
+        entities.
+
+        The regex path survives only for a record that arrives with no
+        curated metadata at all, and what it produces is marked as such
+        so a reader can tell the two apart.
+        """
+        curated = item.entities or {}
+        if any(curated.get(axis) for axis in self.AXES):
+            return {axis: list(dict.fromkeys(curated.get(axis) or []))
+                    for axis in self.AXES}
+
         text = " ".join(filter(None, [item.title, item.abstract]))
-        found = extract_entities_from_text(text) if text else {}
+        if not text:
+            return {axis: [] for axis in self.AXES}
 
-        # MeSH headings are assigned by human indexers; keep them ahead of
-        # the keyword matcher's guesses, and drop duplicates.
-        conditions = list(dict.fromkeys(
-            (item.mesh_terms or []) + found.get("conditions", [])))
-
+        found = extract_entities_from_text(text)
+        logger.info(
+            f"{item.id} carried no indexed entities; fell back to keyword "
+            f"matching, which is much coarser")
         return {
-            "conditions": conditions,
+            "conditions": list(dict.fromkeys(
+                (item.mesh_terms or []) + found.get("conditions", []))),
             "interventions": found.get("interventions", []),
             "outcomes": found.get("outcomes", []),
             "populations": found.get("populations", []),
@@ -140,6 +163,9 @@ class EvidenceIngestionService:
                     "pmid": item.pmid,
                     "nct_id": item.nct_id,
                     "has_abstract": bool(item.abstract),
+                    # Randomised trial, meta-analysis, case report: the
+                    # strongest evidence-quality signal either source gives.
+                    "publication_types": item.publication_types or [],
                 },
             }
             normalized.append(record)

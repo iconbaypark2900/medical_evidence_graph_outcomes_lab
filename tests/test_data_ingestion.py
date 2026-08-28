@@ -137,6 +137,76 @@ async def test_fetch_parses_mesh_terms(parsed_article):
     ]
 
 
+# --------------------------------------------------------------------------
+# Curated entity axes
+#
+# PubMed hands over indexed entities that were previously discarded in
+# favour of nine regexes matching bare substrings. That extractor filed the
+# words "treatment", "therapy" and "outcome" as clinical entities: across a
+# 48-document corpus its most-connected "intervention" was `treatment` and
+# its most-connected "outcome" was `outcome`.
+# --------------------------------------------------------------------------
+
+async def test_interventions_come_from_the_curated_chemical_list(parsed_article):
+    """<ChemicalList> is the drugs the paper is about, per NLM indexers."""
+    assert parsed_article["interventions"] == [
+        "Sodium-Glucose Transporter 2 Inhibitors",
+        "dapagliflozin",
+    ]
+
+
+async def test_a_drug_is_not_also_filed_as_a_condition(parsed_article):
+    """Chemicals appear as subject headings too; they belong on one axis."""
+    assert "dapagliflozin" not in parsed_article["conditions"]
+    assert "Sodium-Glucose Transporter 2 Inhibitors" not in parsed_article["conditions"]
+    assert "Heart Failure" in parsed_article["conditions"]
+
+
+async def test_check_tags_become_populations_not_conditions(parsed_article):
+    """"Female" and "Humans" describe who was studied, not what."""
+    assert parsed_article["populations"] == ["Aged", "Female", "Humans"]
+    for tag in ("Aged", "Female", "Humans"):
+        assert tag not in parsed_article["conditions"]
+
+
+async def test_outcomes_come_from_the_qualifier_subheadings(parsed_article):
+    """Qualifiers are a controlled vocabulary describing what was studied
+    about each subject -- the closest curated thing to an outcome axis."""
+    assert parsed_article["outcomes"] == ["mortality", "drug therapy", "therapeutic use"]
+
+
+async def test_study_design_is_captured(parsed_article):
+    """Whether a paper is an RCT is the strongest evidence-quality signal
+    available here, and none of it used to be kept."""
+    assert parsed_article["publication_types"] == [
+        "Journal Article", "Randomized Controlled Trial"]
+
+
+async def test_major_topics_are_distinguished_from_incidental_headings(parsed_article):
+    assert parsed_article["major_topics"] == [
+        "Heart Failure", "Sodium-Glucose Transporter 2 Inhibitors"]
+
+
+async def test_a_record_with_no_indexed_entities_yields_empty_axes(
+    fake_session, fake_response
+):
+    """Empty because nothing was indexed, not because nothing was looked
+    for. The ingestion service decides whether to fall back."""
+    bare = PUBMED_EFETCH_XML[:PUBMED_EFETCH_XML.index("<ChemicalList>")] + """
+      </MedlineCitation>
+  </PubmedArticle>
+</PubmedArticleSet>
+"""
+    fetcher = PubMedFetcher(min_interval=0)
+    fetcher.session = fake_session(fake_response(200, text=bare))
+
+    article = (await fetcher.fetch_pubmed_articles(["31234567"]))[0]
+
+    assert article["interventions"] == []
+    assert article["populations"] == []
+    assert article["publication_types"] == []
+
+
 async def test_fetch_short_circuits_on_an_empty_pmid_list(fake_session):
     """No ids is a legitimate no-op, not a failure -- no request is made."""
     fetcher = PubMedFetcher()

@@ -25,6 +25,21 @@ logger = logging.getLogger(__name__)
 PUBMED_MIN_INTERVAL = 0.36
 RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
+# MeSH "check tags": headings NLM applies to describe the studied
+# population rather than the subject matter. They are the population axis,
+# and treating them as conditions puts "Female" and "Humans" in the
+# disease graph.
+MESH_CHECK_TAGS = frozenset({
+    "Humans", "Animals", "Male", "Female", "Pregnancy",
+    "Adolescent", "Adult", "Aged", "Aged, 80 and over", "Child",
+    "Child, Preschool", "Infant", "Infant, Newborn", "Middle Aged",
+    "Young Adult",
+    # Common model organisms, applied the same way.
+    "Mice", "Rats", "Dogs", "Rabbits", "Cattle", "Swine", "Sheep", "Cats",
+    "Guinea Pigs", "Horses", "Goats", "Chick Embryo", "Haplorhini",
+    "Cells, Cultured", "In Vitro Techniques",
+})
+
 
 class RateLimiter:
     """Enforces a minimum interval between requests."""
@@ -64,6 +79,7 @@ class MedicalEvidence:
     nct_id: str = None
     mesh_terms: List[str] = None
     entities: Dict[str, List[str]] = None
+    publication_types: List[str] = None
 
 
 class PubMedFetcher:
@@ -218,6 +234,72 @@ class PubMedFetcher:
         return " ".join(sections)
 
     @classmethod
+    def _parse_chemicals(cls, article) -> List[str]:
+        """Substances from <ChemicalList>.
+
+        NLM indexers list the drugs and chemicals a paper is about,
+        separately from the subject headings. This is the intervention
+        axis, curated, and it was being discarded in favour of a regex
+        that matched the words "drug", "therapy" and "treatment".
+        """
+        return [
+            cls._text_of(name)
+            for name in article.findall(".//ChemicalList/Chemical/NameOfSubstance")
+            if cls._text_of(name)
+        ]
+
+    @classmethod
+    def _parse_publication_types(cls, article) -> List[str]:
+        """Study design from <PublicationType>.
+
+        Whether a paper is a randomised controlled trial, a meta-analysis
+        or a case report is the single strongest signal of evidence
+        quality available here, and none of it was being kept.
+        """
+        return [
+            cls._text_of(t)
+            for t in article.findall(".//PublicationTypeList/PublicationType")
+            if cls._text_of(t)
+        ]
+
+    @classmethod
+    def _parse_mesh(cls, article) -> Dict[str, List[str]]:
+        """Split MeSH headings into subject, population and outcome axes.
+
+        Descriptors that are check tags describe the population. Qualifier
+        subheadings ('mortality', 'adverse effects', 'therapeutic use')
+        are a controlled vocabulary describing what was studied about the
+        subject, which is the closest curated thing to an outcome axis.
+        """
+        descriptors, populations, qualifiers, major = [], [], [], []
+
+        for heading in article.findall(".//MeshHeadingList/MeshHeading"):
+            descriptor = heading.find("DescriptorName")
+            name = cls._text_of(descriptor)
+            if not name:
+                continue
+
+            if name in MESH_CHECK_TAGS:
+                populations.append(name)
+            else:
+                descriptors.append(name)
+                if descriptor.get("MajorTopicYN") == "Y":
+                    major.append(name)
+
+            for qualifier in heading.findall("QualifierName"):
+                text = cls._text_of(qualifier)
+                if text:
+                    qualifiers.append(text)
+
+        dedupe = lambda values: list(dict.fromkeys(values))
+        return {
+            "descriptors": dedupe(descriptors),
+            "populations": dedupe(populations),
+            "qualifiers": dedupe(qualifiers),
+            "major_topics": dedupe(major),
+        }
+
+    @classmethod
     def _parse_pub_date(cls, article) -> str:
         """Publication year, falling back to the free-text MedlineDate."""
         year = cls._text_of(article.find(".//Journal//PubDate/Year"))
@@ -243,6 +325,13 @@ class PubMedFetcher:
                 # can also match ids inside reference and comment lists.
                 pmid = self._text_of(article.find("./MedlineCitation/PMID"))
 
+                mesh = self._parse_mesh(article)
+                chemicals = self._parse_chemicals(article)
+
+                # Chemicals also appear as subject headings. Keep them on the
+                # intervention axis only, so a drug is not also a condition.
+                chemical_names = set(chemicals)
+
                 articles.append({
                     "pmid": pmid,
                     "title": self._text_of(article.find(".//ArticleTitle")),
@@ -250,10 +339,14 @@ class PubMedFetcher:
                     "journal": self._text_of(article.find(".//Journal/Title")),
                     "pub_date": self._parse_pub_date(article),
                     "authors": self._parse_authors(article),
-                    "mesh_terms": [
-                        self._text_of(term)
-                        for term in article.findall(".//MeshHeading/DescriptorName")
-                    ],
+                    "mesh_terms": mesh["descriptors"],
+                    "major_topics": mesh["major_topics"],
+                    "conditions": [
+                        d for d in mesh["descriptors"] if d not in chemical_names],
+                    "interventions": chemicals,
+                    "outcomes": mesh["qualifiers"],
+                    "populations": mesh["populations"],
+                    "publication_types": self._parse_publication_types(article),
                     "source": "PubMed",
                 })
 
@@ -357,7 +450,14 @@ async def ingest_medical_evidence(search_terms: List[str], max_per_source: int =
                         source=article['source'],
                         pmid=article['pmid'],
                         mesh_terms=article['mesh_terms'],
-                        entities={}  # Will be populated later
+                        publication_types=article['publication_types'],
+                        # Curated by NLM indexers; no guessing required.
+                        entities={
+                            "conditions": article['conditions'],
+                            "interventions": article['interventions'],
+                            "outcomes": article['outcomes'],
+                            "populations": article['populations'],
+                        },
                     )
                     all_evidence.append(evidence)
     
@@ -372,25 +472,54 @@ async def ingest_medical_evidence(search_terms: List[str], max_per_source: int =
                 identification = study.get("identificationModule", {})
                 description = study.get("descriptionModule", {})
                 status = study.get("statusModule", {})
-                
-                # Extract available information
+                design = study.get("designModule", {})
+                eligibility = study.get("eligibilityModule", {})
+
                 nct_id = identification.get("nctId", "")
-                title = identification.get("briefTitle", "")
-                description_text = description.get("briefSummary", "")
-                condition = description.get("conditions", [])
-                
-                # Format the trial data similar to PubMed articles
+
+                # Conditions live in conditionsModule. The previous code read
+                # descriptionModule.conditions, a key that does not exist in
+                # the v2 schema, so every trial was ingested with none.
+                conditions = study.get("conditionsModule", {}).get("conditions", [])
+
+                interventions = [
+                    intervention.get("name", "")
+                    for intervention in study.get(
+                        "armsInterventionsModule", {}).get("interventions", [])
+                    if intervention.get("name")
+                ]
+                outcomes = [
+                    outcome.get("measure", "")
+                    for outcome in study.get(
+                        "outcomesModule", {}).get("primaryOutcomes", [])
+                    if outcome.get("measure")
+                ]
+
+                # Age bands and sex, as the registry records them.
+                populations = list(eligibility.get("stdAges", []))
+                if eligibility.get("sex") and eligibility["sex"] != "ALL":
+                    populations.append(eligibility["sex"])
+
+                study_types = [t for t in [design.get("studyType")] if t]
+                study_types += design.get("phases", []) or []
+
                 evidence = MedicalEvidence(
                     id=f"trial_{nct_id}",
-                    title=title,
-                    abstract=description_text,
-                    pub_date=status.get("startDateStruct", {}).get("date", "")[:4],  # Just year
-                    authors=[],  # Trials don't typically have personal authors like papers
-                    journal="ClinicalTrials.gov",  # Placeholder
+                    title=identification.get("briefTitle", ""),
+                    abstract=description.get("briefSummary", ""),
+                    pub_date=status.get("startDateStruct", {}).get("date", "")[:4],
+                    authors=[],  # Trials are not credited to personal authors.
+                    journal="ClinicalTrials.gov",
                     source="ClinicalTrials.gov",
                     nct_id=nct_id,
-                    mesh_terms=condition,
-                    entities={"conditions": condition} if condition else {}
+                    mesh_terms=conditions,
+                    publication_types=study_types,
+                    entities={
+                        "conditions": conditions,
+                        "interventions": interventions,
+                        "outcomes": outcomes,
+                        "populations": populations,
+                    },
                 )
                 all_evidence.append(evidence)
     

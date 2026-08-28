@@ -64,7 +64,7 @@ The Medical Evidence Graph & Outcomes Insight Lab is a sophisticated platform de
 | Risk models (train / score, held-out metrics) | working, via `/api/models/risk/train` |
 | Evidence retrieval (PubMed, ClinicalTrials.gov) | working, live |
 | Streamlit clinical frontend | working against the API above |
-| Evidence ingestion service | working; delegates to `src/data_ingestion.py`, emits records the graph service consumes |
+| Evidence ingestion service | working; entities come from curated NLM/registry metadata, not keyword matching |
 | Outcomes analytics service | working; cohort criteria applied for real, log-rank tests for group comparison |
 | Evidence graph service | link suggestion working (Adamic-Adar over the real graph); **KGE embeddings not implemented** — `recompute_kge_features` raises rather than returning random vectors |
 | Evidence storage (Neo4j + OpenSearch + Qdrant) | working — `src/integration.py` indexes into all three |

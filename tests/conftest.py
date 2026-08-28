@@ -149,14 +149,40 @@ PUBMED_EFETCH_XML = """<?xml version="1.0" encoding="UTF-8"?>
           </Author>
         </AuthorList>
       </Article>
+      <ChemicalList>
+        <Chemical>
+          <RegistryNumber>0</RegistryNumber>
+          <NameOfSubstance UI="D000077203">Sodium-Glucose Transporter 2 Inhibitors</NameOfSubstance>
+        </Chemical>
+        <Chemical>
+          <RegistryNumber>1ULL0QJ8UC</RegistryNumber>
+          <NameOfSubstance UI="C529054">dapagliflozin</NameOfSubstance>
+        </Chemical>
+      </ChemicalList>
       <MeshHeadingList>
         <MeshHeading>
-          <DescriptorName UI="D006333" MajorTopicYN="N">Heart Failure</DescriptorName>
+          <DescriptorName UI="D000368" MajorTopicYN="N">Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D006333" MajorTopicYN="Y">Heart Failure</DescriptorName>
+          <QualifierName UI="Q000401" MajorTopicYN="N">mortality</QualifierName>
+          <QualifierName UI="Q000188" MajorTopicYN="Y">drug therapy</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D000077203" MajorTopicYN="Y">Sodium-Glucose Transporter 2 Inhibitors</DescriptorName>
+          <QualifierName UI="Q000627" MajorTopicYN="Y">therapeutic use</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
+      <PublicationTypeList>
+        <PublicationType UI="D016428">Journal Article</PublicationType>
+        <PublicationType UI="D016449">Randomized Controlled Trial</PublicationType>
+      </PublicationTypeList>
     </MedlineCitation>
   </PubmedArticle>
 </PubmedArticleSet>

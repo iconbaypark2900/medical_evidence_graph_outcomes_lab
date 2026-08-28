@@ -60,6 +60,17 @@ ENTITY_SCHEMA = {
 # rather than appending a duplicate under a fresh id.
 POINT_NAMESPACE = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
 
+# Longest string that becomes a graph node.
+#
+# The graph retriever works by SHARED entities, so a node no other record
+# can match contributes nothing but weight. ClinicalTrials.gov primary
+# outcome measures are free text and often a full sentence ("Prevention of
+# COVID-19 Complications or Death: During the 30-day Treatment Period,
+# Time to First Occurrence of..."), which is unique per trial by
+# construction. Those stay searchable in OpenSearch, where the text is the
+# point, and are kept out of the graph, where it is noise.
+MAX_ENTITY_NODE_LENGTH = 80
+
 
 class StorageError(RuntimeError):
     """A write did not complete. Never swallowed into a False return."""
@@ -103,6 +114,7 @@ def evidence_to_document(evidence: MedicalEvidence) -> Dict[str, Any]:
         "pmid": evidence.pmid,
         "nct_id": evidence.nct_id,
         "mesh_terms": evidence.mesh_terms or [],
+        "publication_types": evidence.publication_types or [],
         "conditions": entities.get("conditions", []),
         "interventions": entities.get("interventions", []),
         "outcomes": entities.get("outcomes", []),
@@ -245,6 +257,7 @@ class EvidenceStore:
                             "pmid": {"type": "keyword"},
                             "nct_id": {"type": "keyword"},
                             "mesh_terms": {"type": "keyword"},
+                            "publication_types": {"type": "keyword"},
                             "conditions": {"type": "keyword"},
                             "interventions": {"type": "keyword"},
                             "outcomes": {"type": "keyword"},
@@ -288,6 +301,7 @@ class EvidenceStore:
             "pmid": e.pmid,
             "nct_id": e.nct_id,
             "mesh_terms": e.mesh_terms or [],
+            "publication_types": e.publication_types or [],
             "indexed_at": datetime.now(timezone.utc).isoformat(),
         } for e in evidence]
 
@@ -307,7 +321,7 @@ class EvidenceStore:
                         {"evidence_id": e.id, "name": name}
                         for e in evidence
                         for name in (e.entities or {}).get(kind, [])
-                        if name
+                        if name and len(name) <= MAX_ENTITY_NODE_LENGTH
                     ]
                     if not links:
                         continue
