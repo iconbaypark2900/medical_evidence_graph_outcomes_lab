@@ -39,6 +39,13 @@ ui = [
     "streamlit>=1.30",
     "plotly>=5.18",
 ]
+# Presidio-backed PHI detection. Without it the `patterns` backend still
+# runs; selecting `presidio` without installing this raises at startup
+# rather than scanning nothing.
+phi = [
+    "presidio-analyzer>=2.2",
+    "spacy>=3.7",
+]
 # Graph-RAG: the three backing stores plus the embedding model. Needs
 # `docker compose up -d`. Without this extra the analysis API, the risk
 # models and the frontend all still work; only retrieval is unavailable.

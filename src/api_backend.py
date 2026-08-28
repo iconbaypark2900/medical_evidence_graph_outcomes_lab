@@ -43,6 +43,7 @@ from sklearn.metrics import r2_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 
 from src.data_ingestion import ClinicalTrialsFetcher, PubMedFetcher
+from src.phi import PHIDetected, scanner_from_config
 from src.outcomes_analytics_service.main import (
     CohortDefinition,
     CohortError,
@@ -116,6 +117,30 @@ def load_allowed_origins(config_path: str = "config/settings.json") -> List[str]
 
 API_KEYS = load_api_keys()
 ALLOWED_ORIGINS = load_allowed_origins()
+
+
+def load_phi_scanner(config_path: str = "config/settings.json"):
+    """Build the PHI scanner from config.
+
+    A misconfiguration raises here, at import, rather than at the first
+    request: an API that starts and quietly scans nothing while its config
+    says otherwise is the failure this exists to prevent.
+    """
+    try:
+        config = json.loads(Path(config_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        config = {}
+    return scanner_from_config(config)
+
+
+phi_scanner = load_phi_scanner()
+
+if phi_scanner.enabled:
+    logger.info(f"PHI detection: {phi_scanner.backend}, "
+                f"on detection {phi_scanner.on_detection}")
+else:
+    logger.info(
+        "PHI detection is off. Send de-identified or synthetic data only.")
 
 if not API_KEYS:
     logger.warning(
@@ -319,6 +344,44 @@ class TrainRiskModelRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Shared conversion
 # ---------------------------------------------------------------------------
+
+# Fields that carry caller-supplied free text and so can carry an
+# identifier. Everything else on PatientInput is numeric or an enum.
+FREE_TEXT_FIELDS = (
+    "patient_id", "race", "previous_treatments", "medication_list",
+    "lab_value_names",
+)
+
+
+def free_text_of(patient: PatientInput) -> Dict[str, Any]:
+    history = patient.treatment_history
+    return {
+        "patient_id": patient.patient_id,
+        "race": patient.demographics.race,
+        "previous_treatments": history.previous_treatments if history else [],
+        "medication_list": history.medication_list if history else [],
+        # Keys, not values: the values are floats, the keys are free-form.
+        "lab_value_names": list((patient.clinical_indicators.lab_values or {})),
+    }
+
+
+def screen_for_phi(patients: List[PatientInput]) -> None:
+    """Reject a payload carrying direct identifiers.
+
+    Rejecting rather than redacting by default: silently altering the
+    caller's data would change what is analysed without saying so, and
+    this service's stated scope is de-identified or synthetic data.
+    """
+    if not phi_scanner.enabled:
+        return
+    for patient in patients:
+        try:
+            phi_scanner.enforce(free_text_of(patient))
+        except PHIDetected as e:
+            # The message names the field and the kind, never the matched
+            # text -- echoing it back would copy the identifier into logs.
+            raise HTTPException(status_code=422, detail=str(e)) from e
+
 
 def patients_to_frame(patients: List[PatientInput]) -> pd.DataFrame:
     """Canonical patient -> DataFrame conversion.
@@ -789,6 +852,8 @@ async def health_check():
         # Stated, not assumed. An unauthenticated deployment should be
         # visible to whoever is looking at it.
         "authentication": "api_key" if API_KEYS else "disabled",
+        # What is actually done, not what a config flag asserts.
+        "phi_detection": phi_scanner.describe,
     }
 
 
@@ -803,6 +868,7 @@ async def train_risk_models(request: TrainRiskModelRequest, _key: str = Depends(
     Splitting matters here: a random forest scored on its own training rows
     reports near-perfect accuracy on any labels at all, including noise.
     """
+    screen_for_phi(request.training_data)
     logger.info(f"Training risk models on {len(request.training_data)} patients")
 
     frame = patients_to_frame(request.training_data)
@@ -890,6 +956,8 @@ async def assess_patient_risk(patients: List[PatientInput], _key: str = Depends(
     if not patients:
         raise HTTPException(status_code=422, detail="No patients supplied")
 
+    screen_for_phi(patients)
+
     if not risk_model_registry.is_ready():
         # The alternative — training on generated labels inside this request
         # — produced a mortality risk of 0.0 for every patient alongside
@@ -949,6 +1017,7 @@ async def kaplan_meier_analysis(request: SurvivalAnalysisRequest, _key: str = De
     np.random.exponential, making the response a function of the cohort
     SIZE and the RNG state.
     """
+    screen_for_phi(request.patient_data)
     logger.info(f"Running Kaplan-Meier analysis for {len(request.patient_data)} patients")
 
     duration = np.array([p.follow_up.observed_time_days for p in request.patient_data])
@@ -996,6 +1065,7 @@ async def cox_regression_analysis(request: SurvivalAnalysisRequest, _key: str = 
     and `event` were drawn per row from np.random, so the reported hazard
     ratios described the association between a real covariate and noise.
     """
+    screen_for_phi(request.patient_data)
     logger.info(f"Running Cox regression for {len(request.patient_data)} patients")
 
     frame = patients_to_frame(request.patient_data)
@@ -1052,6 +1122,7 @@ async def estimate_ate(request: CausalAnalysisRequest, _key: str = Depends(requi
     from np.random.binomial(1, 0.1 + 0.1 * treatment) — so the returned
     "effect" was the 0.1 constant written into that line, recovered.
     """
+    screen_for_phi(request.patient_data)
     logger.info(f"Estimating ATE for {len(request.patient_data)} patients")
 
     frame = patients_to_frame(request.patient_data)
@@ -1191,6 +1262,7 @@ async def compare_cohorts(request: CohortAnalysisRequest, _key: str = Depends(re
             detail="A comparator cohort is required; there is nothing to "
                    "compare a single cohort against")
 
+    screen_for_phi(request.patient_cohort + request.comparator_cohort)
     logger.info(
         f"Comparing cohorts: {len(request.patient_cohort)} vs "
         f"{len(request.comparator_cohort)} patients")
@@ -1298,6 +1370,7 @@ async def build_cohort_endpoint(request: CohortBuildRequest,
     would silently produce a cohort broader than the one defined, and every
     rate computed from it would be wrong with no sign of it.
     """
+    screen_for_phi(request.patients)
     definition, cohort = build_cohort(request)
 
     try:
@@ -1338,6 +1411,7 @@ async def comparative_effectiveness(request: ComparativeEffectivenessRequest,
             detail=f"{len(request.groups)} arm labels for "
                    f"{len(request.patients)} patients")
 
+    screen_for_phi(request.patients)
     definition, cohort = build_cohort(request, request.groups)
 
     try:

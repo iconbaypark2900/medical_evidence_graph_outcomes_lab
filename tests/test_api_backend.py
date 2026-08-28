@@ -1012,3 +1012,66 @@ def test_a_median_landing_exactly_on_a_half_is_not_pushed_to_the_next_step():
         [0.0, 10.0, 20.0, 30.0, 40.0],
         [1.0, 5 / 6, (5 / 6) * (4 / 5), (5 / 6) * (4 / 5) * (3 / 4), 0.0],
     ) == 30.0
+
+
+# --------------------------------------------------------------------------
+# PHI screening at the API boundary
+# --------------------------------------------------------------------------
+
+def test_a_payload_carrying_an_identifier_is_rejected(client):
+    """patient_id is the realistic mistake: an MRN pasted into it."""
+    carrying = patient(0)
+    carrying["patient_id"] = "MRN 4029381"
+
+    response = client.post("/api/patients/risk-assessment", json=[carrying])
+
+    assert response.status_code == 422
+    assert "personal identifiers" in response.json()["detail"]
+
+
+def test_the_rejection_does_not_echo_the_identifier(client):
+    """Echoing it copies the identifier into logs and error payloads."""
+    carrying = patient(0)
+    carrying["patient_id"] = "123-45-6789"
+
+    detail = client.post("/api/patients/risk-assessment", json=[carrying]).json()["detail"]
+
+    assert "123-45-6789" not in detail
+    assert "patient_id" in detail
+
+
+def test_an_identifier_in_a_medication_list_is_caught(client):
+    carrying = patient(0)
+    carrying["treatment_history"] = {"medication_list": ["metformin", "call 555-867-5309"]}
+
+    response = client.post("/api/patients/risk-assessment", json=[carrying])
+
+    assert response.status_code == 422
+
+
+def test_survival_analysis_screens_its_patients_too(client):
+    """Every entry point that accepts patient data, not just one."""
+    carrying = record(0, days=10.0)
+    carrying["patient_id"] = "MRN 4029381"
+
+    response = client.post(
+        "/api/survival-analysis/kaplan-meier",
+        json={"patient_data": [carrying, record(1, days=20.0)]})
+
+    assert response.status_code == 422
+
+
+def test_ordinary_identifiers_pass_through(client):
+    """A detector that blocked pt_001 would be turned off within a day."""
+    response = client.post("/api/patients/risk-assessment", json=[patient(0)])
+
+    # 503 because no model is trained, which means screening let it through.
+    assert response.status_code == 503
+
+
+def test_health_reports_what_phi_detection_actually_does(client):
+    described = client.get("/api/health").json()["phi_detection"]
+
+    assert described["enabled"] is True
+    assert described["backend"] == "patterns"
+    assert "not detected" in described["note"]

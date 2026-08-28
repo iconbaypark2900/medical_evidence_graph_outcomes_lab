@@ -255,6 +255,23 @@ evidence answers the question.
 .venv/bin/python main.py pathway_guideline_service    # not yet reviewed
 ```
 
+### PHI screening
+
+Every endpoint that accepts patient data screens its free-text fields —
+`patient_id`, `race`, `previous_treatments`, `medication_list`, and the
+keys of `lab_values` — and rejects a payload carrying direct identifiers
+with a 422 that names the field and the kind but never the matched text.
+
+The default `patterns` backend matches national ids, emails, phone
+numbers, dates of birth, and long digit runs. **It does not detect names
+or addresses.** `security.phi.backend = "presidio"` uses Presidio's NLP
+recognisers and needs the `phi` extra; selecting it without installing
+that extra raises at startup rather than quietly scanning nothing.
+
+`/api/health` reports what is actually being done, including that
+limitation. The config previously declared `presidio.enabled: true` with
+no Presidio code anywhere in the repository.
+
 ## Security, Privacy & Governance
 
 - De-identified or synthetic data for patient-level pipelines

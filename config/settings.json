@@ -67,16 +67,18 @@
         "vault": {
             "url": "http://localhost:8200"
         },
-        "presidio": {
-            "enabled": true,
-            "analyze_timeout": 5000
-        },
         "api_keys": [],
         "allowed_origins": [
             "http://localhost:8501",
             "http://127.0.0.1:8501"
         ],
-        "_note": "api_keys empty means the API is unauthenticated. Set MEG_API_KEYS (comma-separated) or fill this list before exposing it beyond localhost."
+        "_note": "api_keys empty means the API is unauthenticated. Set MEG_API_KEYS (comma-separated) or fill this list before exposing it beyond localhost.",
+        "phi": {
+            "enabled": true,
+            "backend": "patterns",
+            "on_detection": "reject",
+            "_note": "backend 'patterns' matches direct identifiers only (national id, email, phone, date of birth, long digit runs). It does not detect names or addresses. backend 'presidio' needs the phi extra and raises at startup if it is missing rather than silently scanning nothing -- which is what the previous presidio.enabled=true did, with no Presidio code anywhere in the repository."
+        }
     },
     "observability": {
         "mlflow_tracking_uri": "http://localhost:5000",
