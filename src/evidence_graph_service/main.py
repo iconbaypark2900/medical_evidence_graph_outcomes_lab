@@ -14,6 +14,17 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
+# Which node label each relation may point at. The graph schema already
+# encodes this; without it the model will happily propose a Population as
+# an intervention, which is not a near miss but a category error.
+RELATION_TARGET_LABEL = {
+    "HAS_CONDITION": "Condition",
+    "HAS_INTERVENTION": "Intervention",
+    "HAS_OUTCOME": "Outcome",
+    "HAS_POPULATION": "Population",
+}
+
+
 def entity_id(label: str, name: str) -> str:
     """Stable identifier for a named entity.
 
@@ -46,13 +57,85 @@ class GraphEdge:
 
 
 class EvidenceGraphService:
+    """Link suggestion and embeddings over the evidence graph.
+
+    There used to be two graphs. `src/integration.py` wrote the real one
+    into Neo4j, and this service kept its own nodes and edges in memory
+    with a `graph_db = None  # This would connect to Neo4j` placeholder,
+    so the service that reasons over the graph never read the graph the
+    pipeline populates.
+
+    That was not only untidy. `kge_suggestions` filters out links that
+    already exist by consulting `self.edges`, so running a model trained
+    on Neo4j triples against an in-memory demo graph meant the filter
+    matched nothing and the service happily suggested links already in the
+    graph. The filter silently did nothing in the only configuration where
+    the model was useful.
+
+    One graph now, filled either from Neo4j or from parsed evidence, with
+    `graph_source` recording which so a reader can tell.
+    """
+
     def __init__(self):
-        """
-        Initialize the evidence graph service
-        """
         self.nodes = {}
         self.edges = {}
-        self.graph_db = None  # This would connect to Neo4j in a real implementation
+        self.graph_source = "empty"
+
+    async def load_from_neo4j(self, config_path: str = "config/settings.json") -> int:
+        """Populate from the persisted graph. Returns the edge count."""
+        import neo4j
+
+        from src.integration import load_database_config
+
+        config = load_database_config(config_path)["neo4j"]
+        driver = neo4j.AsyncGraphDatabase.driver(
+            config.get("uri", "bolt://localhost:7687"),
+            auth=(config.get("username", "neo4j"), config.get("password", "")))
+        try:
+            async with driver.session() as session:
+                result = await session.run(
+                    """
+                    MATCH (e:Evidence)-[r]->(n)
+                    WHERE n.name IS NOT NULL
+                    RETURN e.id AS head, e.title AS title, e.source AS source,
+                           type(r) AS relation, n.name AS tail,
+                           labels(n)[0] AS tail_label
+                    """)
+                rows = await result.data()
+        finally:
+            await driver.close()
+
+        self.nodes = {}
+        self.edges = {}
+        for row in rows:
+            self.nodes[row["head"]] = GraphNode(
+                id=row["head"], label="Evidence",
+                properties={"title": row["title"], "source": row["source"]})
+            tail_id = entity_id(row["tail_label"].lower(), row["tail"])
+            self.nodes[tail_id] = GraphNode(
+                id=tail_id, label=row["tail_label"], properties={"name": row["tail"]})
+            edge_id = f"edge_{row['head']}_{tail_id}"
+            self.edges[edge_id] = GraphEdge(
+                id=edge_id, source=row["head"], target=tail_id,
+                relationship=row["relation"], properties={})
+
+        self.graph_source = "neo4j"
+        logger.info(
+            f"Loaded {len(self.nodes)} nodes and {len(self.edges)} edges "
+            f"from Neo4j")
+        return len(self.edges)
+
+    def describe_graph(self) -> Dict[str, Any]:
+        """Which graph this is, so a reader is not guessing."""
+        by_label: Dict[str, int] = defaultdict(int)
+        for node in self.nodes.values():
+            by_label[node.label] += 1
+        return {
+            "source": self.graph_source,
+            "nodes": len(self.nodes),
+            "edges": len(self.edges),
+            "by_label": dict(sorted(by_label.items())),
+        }
     
     def add_node(self, node: GraphNode):
         """Add a node to the graph"""
@@ -162,6 +245,9 @@ class EvidenceGraphService:
         # Add edges
         for edge in graph_elements["edges"]:
             self.add_edge(edge)
+
+        if self.graph_source != "neo4j":
+            self.graph_source = "memory"
     
     def _adjacency(self) -> Dict[str, Set[str]]:
         """Undirected neighbour map built from the edges actually present."""
@@ -190,6 +276,10 @@ class EvidenceGraphService:
         from src.kge import build_and_evaluate
 
         if triples is None:
+            # Whatever graph is loaded -- Neo4j when load_from_neo4j has
+            # run, the parsed one otherwise. The known-edge filter in
+            # kge_suggestions reads the same edges, so the two cannot
+            # disagree about what already exists.
             triples = [
                 (edge.source, edge.relationship, edge.target)
                 for edge in self.edges.values()
@@ -205,6 +295,10 @@ class EvidenceGraphService:
         self.kge_model = model
         self.kge_store = store
         self.kge_report = report
+        # Recorded so a stale model -- one trained before the graph was
+        # reloaded -- can be detected rather than quietly served.
+        self.kge_graph_source = self.graph_source
+        self.kge_edge_count = len(self.edges)
 
         logger.info(
             f"{model_name}: MRR {report.evaluation.mrr:.4f}, "
@@ -226,6 +320,15 @@ class EvidenceGraphService:
             raise RuntimeError(
                 "No embeddings have been trained. Call recompute_kge_features.")
 
+        # Staleness first. If the graph moved after training, the stored
+        # evaluation describes a graph that no longer exists, so neither
+        # the entity indices nor the "beats baselines" verdict are live.
+        if getattr(self, "kge_edge_count", None) != len(self.edges):
+            raise RuntimeError(
+                f"The graph changed after training ({self.kge_edge_count} "
+                f"edges then, {len(self.edges)} now). Retrain before serving "
+                f"suggestions: entity indices no longer line up.")
+
         # Arguments are validated before the serving gate. An unknown
         # entity is a caller error whether or not the model was good
         # enough to serve, and reporting it as "the model lost" would send
@@ -246,19 +349,36 @@ class EvidenceGraphService:
                 f"its suggestions are not served. Use "
                 f"suggest_related_entities.")
 
+        # Checked here rather than lower down: if the graph moved, the
+        # stored evaluation describes a graph that no longer exists, so
+        # "did it beat its baselines" is not a live answer either.
+
         from src.kge import kge_scorer
 
         scores = kge_scorer(model, store)(head, relation, store.entities)
+        # Read from the same graph the model was trained on. Consulting a
+        # different one made this filter match nothing.
         known = {edge.target for edge in self.edges.values()
                  if edge.source == head and edge.relationship == relation}
+
+        # Candidates are restricted to the label the relation points at.
+        # An unconstrained ranking proposes a Population as an
+        # intervention, which is a category error rather than a near miss.
+        expected_label = RELATION_TARGET_LABEL.get(relation)
 
         ranked = sorted(zip(store.entities, scores), key=lambda pair: -pair[1])
         suggestions = []
         for entity, score in ranked:
             if entity == head or entity in known:
                 continue
+            node = self.nodes.get(entity)
+            if expected_label and (node is None or node.label != expected_label):
+                continue
             suggestions.append({
                 "target": entity,
+                # An opaque content hash tells a reader nothing.
+                "name": node.properties.get("name", entity) if node else entity,
+                "label": node.label if node else None,
                 "score": float(score),
                 "scoring_method": f"kge:{report.parameters['model']}",
                 "relationship_type": relation,

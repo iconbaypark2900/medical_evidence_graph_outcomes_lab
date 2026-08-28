@@ -18,6 +18,7 @@ import sys
 import pytest
 
 from src.evidence_graph_service.main import (
+    RELATION_TARGET_LABEL,
     EvidenceGraphService,
     GraphEdge,
     GraphNode,
@@ -243,6 +244,24 @@ def test_a_node_with_no_shared_neighbours_yields_nothing():
 # NotImplementedError was standing in for.
 # --------------------------------------------------------------------------
 
+def load_triples_into(service: EvidenceGraphService, triples: list) -> None:
+    """Put triples into the service's own graph.
+
+    Training on one graph and querying another is the bug this section is
+    about; a test that does it proves nothing about the fix.
+    """
+    service.nodes = {}
+    service.edges = {}
+    for head, relation, tail in triples:
+        service.add_node(GraphNode(id=head, label="Evidence", properties={}))
+        label = RELATION_TARGET_LABEL[relation]
+        service.add_node(GraphNode(id=tail, label=label, properties={"name": tail}))
+        service.add_edge(GraphEdge(
+            id=f"edge_{head}_{tail}", source=head, target=tail,
+            relationship=relation, properties={}))
+    service.graph_source = "memory"
+
+
 def learnable_triples(n_docs: int = 90, n_topics: int = 6) -> list:
     """Documents in topics, each topic with its own vocabulary.
 
@@ -303,8 +322,8 @@ def test_suggestions_from_a_losing_model_are_refused(service, monkeypatch):
 def test_suggestions_carry_the_evaluation_that_justifies_them(service):
     """A model score is not a probability; shipping the held-out metric
     with it is what makes the number checkable."""
-    report = service.recompute_kge_features(
-        triples=learnable_triples(), epochs=200, dim=32)
+    load_triples_into(service, learnable_triples())
+    report = service.recompute_kge_features(epochs=200, dim=32)
     if not report.beats_baselines:
         pytest.skip("model did not beat baselines on this seed; nothing served")
 
@@ -374,4 +393,110 @@ async def test_triples_can_be_read_from_the_populated_graph(require_stack):
             await session.run(
                 "MATCH (n) WHERE n.id STARTS WITH 'kgetest_' "
                 "OR n.name STARTS WITH 'kgetest ' DETACH DELETE n")
+        await driver.close()
+
+
+# --------------------------------------------------------------------------
+# One graph, not two
+#
+# integration.py wrote the real graph into Neo4j while this service kept
+# its own nodes and edges in memory behind a `graph_db = None  # This would
+# connect to Neo4j` placeholder. kge_suggestions filters out links that
+# already exist by consulting self.edges, so a model trained on Neo4j
+# triples checked a different graph for them: the filter matched nothing
+# and the service suggested links the graph already had.
+# --------------------------------------------------------------------------
+
+def test_a_fresh_service_says_its_graph_is_empty():
+    assert EvidenceGraphService().describe_graph()["source"] == "empty"
+
+
+def test_parsing_evidence_marks_the_graph_as_in_memory(service):
+    described = service.describe_graph()
+
+    assert described["source"] == "memory"
+    assert described["edges"] > 0
+    assert described["by_label"]["Condition"] >= 1
+
+
+def test_suggestions_exclude_links_the_graph_already_has(service):
+    """The filter that silently did nothing."""
+    load_triples_into(service, learnable_triples())
+    service.recompute_kge_features(epochs=200, dim=32)
+    if getattr(service, "kge_model", None) is None:
+        pytest.skip("model did not beat baselines on this seed")
+
+    head = next(e.source for e in service.edges.values())
+    known = {e.target for e in service.edges.values()
+             if e.source == head and e.relationship == "HAS_CONDITION"}
+
+    suggested = {s["target"] for s in
+                 service.kge_suggestions(head, "HAS_CONDITION", limit=10)}
+
+    assert known, "fixture gives this head no known links; the test proves nothing"
+    assert not (suggested & known)
+
+
+def test_a_graph_changed_after_training_is_refused(service):
+    """Entity indices are positional; a reloaded graph invalidates them."""
+    load_triples_into(service, learnable_triples())
+    service.recompute_kge_features(epochs=20, dim=8)
+    service.add_edge(GraphEdge(
+        id="new", source="doc_0", target="something_new",
+        relationship="HAS_CONDITION", properties={}))
+
+    with pytest.raises(RuntimeError, match="graph changed after training"):
+        service.kge_suggestions("doc_0", "HAS_CONDITION")
+
+
+def test_suggestions_respect_the_relation_target_label():
+    """Proposing a Population as an intervention is a category error, not a
+    near miss, and the graph schema already says so."""
+    from src.evidence_graph_service.main import RELATION_TARGET_LABEL
+
+    assert RELATION_TARGET_LABEL["HAS_INTERVENTION"] == "Intervention"
+    assert RELATION_TARGET_LABEL["HAS_POPULATION"] == "Population"
+
+
+def test_suggestions_carry_a_readable_name(service):
+    """An opaque content hash tells a reader nothing."""
+    load_triples_into(service, learnable_triples())
+    service.recompute_kge_features(epochs=200, dim=32)
+    if getattr(service, "kge_model", None) is None:
+        pytest.skip("model did not beat baselines on this seed")
+
+    for suggestion in service.kge_suggestions("doc_0", "HAS_CONDITION", limit=3):
+        assert suggestion["name"]
+        assert "target" in suggestion
+
+
+@pytest.mark.requires_stack
+async def test_the_service_reads_the_graph_the_pipeline_populates(require_stack):
+    """The point of the whole change: one graph."""
+    import neo4j
+
+    from src.integration import load_database_config
+
+    config = load_database_config()["neo4j"]
+    driver = neo4j.AsyncGraphDatabase.driver(
+        config["uri"], auth=(config["username"], config["password"]))
+    try:
+        async with driver.session() as session:
+            await session.run(
+                "MERGE (e:Evidence {id: 'unifytest_1', title: 'T', source: 'PubMed'}) "
+                "MERGE (n:Intervention {name: 'unifytest drug'}) "
+                "MERGE (e)-[:HAS_INTERVENTION]->(n)")
+
+        service = EvidenceGraphService()
+        edges = await service.load_from_neo4j()
+
+        assert edges > 0
+        assert service.describe_graph()["source"] == "neo4j"
+        assert any(node.properties.get("name") == "unifytest drug"
+                   for node in service.nodes.values())
+    finally:
+        async with driver.session() as session:
+            await session.run(
+                "MATCH (n) WHERE n.id = 'unifytest_1' OR n.name = 'unifytest drug' "
+                "DETACH DELETE n")
         await driver.close()
