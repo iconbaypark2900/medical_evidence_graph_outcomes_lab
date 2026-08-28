@@ -1,5 +1,27 @@
 # Phase 2 Implementation: Enhanced ML Models for Survival Analysis and Causal Inference
 
+> **Correction (2026-08-28).** Several figures below do not survive checking,
+> and the code they describe has since changed:
+>
+> - **"C-index of 0.980 (excellent discrimination)"** was produced on a
+>   synthetic cohort whose baseline hazard (0.001) was so low against a
+>   0.5–5 year follow-up window that almost every patient was censored. The
+>   fit rested on a handful of events. With the hazard calibrated to the
+>   follow-up window, the same code reports ~0.57 — and that figure is still
+>   in-sample, so it describes fit rather than discrimination on new
+>   patients. The API now labels it `c_index_is_in_sample: true`.
+> - **The ATE figures** (-0.251 / -0.259 / -0.295) came from the same
+>   near-eventless cohort, where the outcome was zero for nearly everyone.
+> - **"Deep Learning for Survival Analysis"** described a model that
+>   discarded the survival times and minimised binary cross-entropy on the
+>   event indicator alone, treating a censored patient as a confirmed
+>   non-event. It is now a DeepSurv-style model trained on the Cox partial
+>   log-likelihood, so event times and censoring both enter the fit.
+>
+> See `tests/test_survival_analysis.py` and `tests/test_outcome_models.py`
+> for what is actually asserted about these models now.
+
+
 ## Overview
 Phase 2 of the Medical Evidence Graph & Outcomes Insight Lab has been successfully implemented, focusing on advanced machine learning models for survival analysis and causal inference. This phase adds sophisticated analytical capabilities for understanding patient outcomes, treatment effects, and clinical pathways.
 

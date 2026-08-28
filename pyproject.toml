@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "medical-evidence-graph-outcomes-lab"
+version = "0.1.0"
+description = "Evidence-based medicine platform: medical knowledge graph, outcomes analytics, and graph-RAG over published literature."
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+
+# Only the dependencies the currently-exercised code paths import. The full
+# intended stack (neo4j, opensearch, qdrant, transformers, spacy, mlflow,
+# dowhy, econml) still lives in requirements.txt and is NOT installed by
+# default -- nothing under test imports it yet.
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scipy>=1.11",
+    "scikit-learn>=1.3",
+    "lifelines>=0.27",
+    "torch>=2.0",
+    "fastapi>=0.110",
+    "pydantic>=2.0",
+    "aiohttp>=3.9",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.1",
+    "httpx>=0.27",
+]
+# The Streamlit frontend. Separate from the core install because the API and
+# the analysis library are usable without it, and it is the heaviest piece.
+ui = [
+    "streamlit>=1.30",
+    "plotly>=5.18",
+]
+
+[tool.setuptools]
+packages = []
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+# Restrict discovery to tests/. Several modules under src/ are named
+# *_test.py or test_*.py but are demo/debug scripts with side effects at
+# import time, not tests -- see tests/README.md.
+python_files = ["test_*.py"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+markers = [
+    # Kept registered so a newly-found defect can be pinned the same way:
+    # assert the behaviour you want, mark it, and it converts to a hard
+    # failure the moment someone fixes it. There are currently none.
+    "known_defect: characterizes a real bug that is proven but not yet fixed",
+    "network: requires outbound network access (deselected by default)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::FutureWarning",
+]

@@ -1,21 +1,40 @@
 """
 FastAPI backend for Medical Evidence Graph & Outcomes Insight Lab
-Provides RESTful APIs for the clinical decision support system
+Provides RESTful APIs for the clinical decision support system.
+
+Design rule for this module: an endpoint either analyses the data the
+caller supplied, or it fails. It never substitutes generated data for
+missing data.
+
+Every analysis endpoint here used to accept a list of patients, discard
+it, invent replacement outcomes with `np.random`, and return
+`"status": "success"`. That is worse than an error, because the caller
+has no way to tell a real finding from a sampled one. The schemas below
+therefore require the observed outcome alongside the patient: a
+time-to-event analysis needs follow-up time and an event indicator, a
+causal analysis needs a treatment assignment and an outcome, and a risk
+score needs a model that was fitted on labelled data beforehand. Where
+that input is absent the request is rejected (422) or the service
+reports that it is not ready (503).
 """
 from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Dict, Optional, Union
+from typing import Any, List, Dict, Optional
 import pandas as pd
 import numpy as np
-from datetime import datetime
-from uuid import UUID, uuid4
+from datetime import datetime, timezone
+from uuid import uuid4
 import json
 from enum import Enum
-import asyncio
 import logging
 
-# Import the enhanced ML models from Phase 2
+from scipy import stats
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.metrics import r2_score, roc_auc_score
+from sklearn.model_selection import train_test_split
+
+from src.data_ingestion import ClinicalTrialsFetcher, PubMedFetcher
 from src.enhanced_ml_models import (
     SurvivalAnalysisModels,
     CausalInferenceModels,
@@ -24,19 +43,16 @@ from src.enhanced_ml_models import (
 )
 
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# Create FastAPI app
 app = FastAPI(
     title="Medical Evidence Graph & Outcomes Insight Lab API",
     description="API for clinical decision support and evidence-based medicine",
-    version="1.0.0"
+    version="2.0.0"
 )
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # In production, specify exact origins
@@ -46,7 +62,10 @@ app.add_middleware(
 )
 
 
-# Data Models
+# ---------------------------------------------------------------------------
+# Request models
+# ---------------------------------------------------------------------------
+
 class SexEnum(str, Enum):
     male = "male"
     female = "female"
@@ -75,36 +94,255 @@ class TreatmentHistory(BaseModel):
 
 
 class PatientInput(BaseModel):
+    """A patient's covariates. Carries no outcome, so it can be scored but
+    not analysed."""
     patient_id: Optional[str] = Field(None, description="Unique patient identifier")
     demographics: PatientDemographics
     clinical_indicators: ClinicalIndicators
     treatment_history: Optional[TreatmentHistory] = Field(None)
-    admission_date: Optional[str] = Field(datetime.now().isoformat(), description="Date of admission")
+    admission_date: Optional[str] = Field(None, description="Date of admission")
+
+
+class FollowUp(BaseModel):
+    """Observed follow-up for one patient.
+
+    `event_observed=False` means the patient was censored at
+    `observed_time_days` — they were event-free when last seen, not
+    confirmed event-free forever.
+    """
+    observed_time_days: float = Field(
+        ..., gt=0, description="Days from index date to event or last contact")
+    event_observed: bool = Field(
+        ..., description="True if the event occurred; False if censored")
+
+
+class PatientRecord(PatientInput):
+    """A patient plus their observed follow-up. Required by any
+    time-to-event analysis — without it there is nothing to analyse."""
+    follow_up: FollowUp
+
+
+class TreatmentRecord(PatientInput):
+    """A patient plus their treatment assignment and observed outcome."""
+    treatment_assigned: bool = Field(..., description="True if the patient received the treatment")
+    outcome_value: float = Field(..., description="Observed outcome for this patient")
+
+
+class CohortMember(PatientInput):
+    """A patient plus one or more observed outcomes, keyed by name."""
+    outcomes: Dict[str, float] = Field(
+        ..., min_length=1, description="Observed outcomes, e.g. {'mortality': 0}")
 
 
 class SurvivalAnalysisRequest(BaseModel):
-    patient_data: List[PatientInput]
-    time_horizon_days: int = Field(365, description="Time horizon for survival analysis")
+    patient_data: List[PatientRecord] = Field(..., min_length=2)
+    time_horizon_days: int = Field(365, gt=0, description="Reporting horizon in days")
 
 
 class CausalAnalysisRequest(BaseModel):
-    patient_data: List[PatientInput]
-    treatment_variable: str = Field(..., description="Variable representing the treatment")
-    outcome_variable: str = Field(..., description="Variable representing the outcome")
-    confounders: List[str] = Field([], description="Potential confounding variables")
+    patient_data: List[TreatmentRecord] = Field(..., min_length=4)
+    treatment_variable: str = Field(..., description="Name of the treatment, for reporting")
+    outcome_variable: str = Field(..., description="Name of the outcome, for reporting")
+    confounders: List[str] = Field(
+        [], description="Covariate names to adjust for; must exist on the patients")
 
 
 class CohortAnalysisRequest(BaseModel):
-    patient_cohort: List[PatientInput]
-    comparator_cohort: Optional[List[PatientInput]] = Field(None, description="Comparator group for comparison")
-    outcome_variables: List[str] = Field([], description="Outcomes to analyze")
+    patient_cohort: List[CohortMember] = Field(..., min_length=2)
+    comparator_cohort: Optional[List[CohortMember]] = Field(
+        None, description="Comparator group")
+    outcome_variables: List[str] = Field(
+        [], description="Outcomes to compare; defaults to those present in both cohorts")
+    alpha: float = Field(0.05, gt=0, lt=1, description="Significance level")
 
 
-# Initialize model instances
+class TrainRiskModelRequest(BaseModel):
+    training_data: List[CohortMember] = Field(..., min_length=20)
+    test_size: float = Field(0.25, gt=0.0, lt=1.0)
+    random_state: int = Field(42)
+
+
+# ---------------------------------------------------------------------------
+# Shared conversion
+# ---------------------------------------------------------------------------
+
+def patients_to_frame(patients: List[PatientInput]) -> pd.DataFrame:
+    """Canonical patient -> DataFrame conversion.
+
+    There is exactly one of these on purpose. The previous code built a
+    frame with a 'sex' column at scoring time while models were fitted on
+    `build_patient_features` output (which reads 'gender'), so every
+    prediction raised a feature-name mismatch that was caught and turned
+    into a risk of 0.0.
+    """
+    rows = []
+    for patient in patients:
+        row = {
+            'age': patient.demographics.age,
+            'gender': 'M' if patient.demographics.sex == SexEnum.male else 'F',
+            'baseline_risk_score': patient.clinical_indicators.baseline_risk_score,
+            'comorbidity_count': patient.clinical_indicators.comorbidity_count,
+        }
+        if patient.clinical_indicators.severity_score is not None:
+            row['severity_score'] = patient.clinical_indicators.severity_score
+        for lab_name, lab_value in (patient.clinical_indicators.lab_values or {}).items():
+            row[f'lab_{lab_name}'] = lab_value
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def median_survival_time(time_points: List[float], survival_probs: List[float]) -> Optional[float]:
+    """First time at which survival drops to 0.5 or below.
+
+    Returns None when the curve never reaches 0.5 — median survival is then
+    "not reached", which is a real and reportable answer. The previous code
+    returned `np.median(time_points)`, the midpoint of the time AXIS, which
+    is unrelated to survival.
+    """
+    for time_point, survival in zip(time_points, survival_probs):
+        if survival <= 0.5:
+            return float(time_point)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Risk model registry
+# ---------------------------------------------------------------------------
+
+class RiskModel:
+    """A fitted risk model together with what is needed to reproduce and
+    judge it: the feature columns it saw, the medians used for imputation,
+    and its held-out performance."""
+
+    def __init__(self, outcome: str, model: Any, task: str, feature_columns: List[str],
+                 feature_medians: Dict[str, float], metric_name: str,
+                 metric_value: Optional[float], n_train: int, n_test: int):
+        self.outcome = outcome
+        self.model = model
+        self.task = task
+        self.feature_columns = feature_columns
+        self.feature_medians = feature_medians
+        self.metric_name = metric_name
+        self.metric_value = metric_value
+        self.n_train = n_train
+        self.n_test = n_test
+
+    def align(self, features: pd.DataFrame) -> tuple[pd.DataFrame, List[str]]:
+        """Reindex incoming features onto the fitted columns.
+
+        Columns the caller did not supply are filled with the training
+        median and reported back, so an imputed prediction is never
+        presented as if it came from complete data.
+        """
+        imputed = [c for c in self.feature_columns if c not in features.columns]
+        aligned = features.reindex(columns=self.feature_columns)
+        return aligned.fillna(pd.Series(self.feature_medians)), imputed
+
+    def describe(self) -> Dict[str, Any]:
+        return {
+            "outcome": self.outcome,
+            "task": self.task,
+            "holdout_metric": self.metric_name,
+            "holdout_value": self.metric_value,
+            "n_train": self.n_train,
+            "n_test": self.n_test,
+        }
+
+
+class RiskModelRegistry:
+    """Holds fitted risk models for the process.
+
+    Empty at startup by design. Risk assessment cannot be served until
+    something has been trained on labelled data: fitting a model on
+    generated labels inside the request that then consumes it is a closed
+    loop that reports its own inputs back as findings.
+    """
+
+    def __init__(self):
+        self.models: Dict[str, RiskModel] = {}
+        self.version: Optional[str] = None
+        self.trained_at: Optional[str] = None
+
+    def is_ready(self) -> bool:
+        return bool(self.models)
+
+    def replace(self, models: Dict[str, RiskModel]) -> None:
+        self.models = models
+        self.version = uuid4().hex[:12]
+        self.trained_at = datetime.now(timezone.utc).isoformat()
+
+
+risk_model_registry = RiskModelRegistry()
 survival_models = SurvivalAnalysisModels()
 causal_models = CausalInferenceModels()
-enhanced_models = EnhancedOutcomeModels()
+feature_builder = EnhancedOutcomeModels()
 
+
+# ---------------------------------------------------------------------------
+# Evidence search
+# ---------------------------------------------------------------------------
+
+class EvidenceSearcher:
+    """Retrieves evidence. Overridden in tests via FastAPI dependencies."""
+
+    async def search(self, query: str, limit: int) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+
+class LiteratureEvidenceSearcher(EvidenceSearcher):
+    """Live retrieval from PubMed and ClinicalTrials.gov.
+
+    Replaces a stub that returned `f"Medical Evidence Title {i}: {query}"`
+    — the query echoed back with a relevance score attached.
+    """
+
+    async def search(self, query: str, limit: int) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+
+        async with PubMedFetcher() as pubmed:
+            pmids = await pubmed.search_pubmed(query, limit)
+            for article in await pubmed.fetch_pubmed_articles(pmids[:limit]):
+                results.append({
+                    "id": f"pubmed_{article['pmid']}",
+                    "title": article["title"],
+                    "abstract": article["abstract"],
+                    "source": "PubMed",
+                    "pub_date": article["pub_date"],
+                    "authors": article["authors"],
+                    "mesh_terms": article["mesh_terms"],
+                    "url": f"https://pubmed.ncbi.nlm.nih.gov/{article['pmid']}/",
+                })
+
+        remaining = limit - len(results)
+        if remaining > 0:
+            async with ClinicalTrialsFetcher() as trials:
+                for study in await trials.search_trials(query, remaining):
+                    identification = study.get("protocolSection", {}).get(
+                        "identificationModule", {})
+                    nct_id = identification.get("nctId", "")
+                    results.append({
+                        "id": f"nct_{nct_id}",
+                        "title": identification.get("briefTitle", ""),
+                        "abstract": study.get("protocolSection", {}).get(
+                            "descriptionModule", {}).get("briefSummary", ""),
+                        "source": "ClinicalTrials.gov",
+                        "pub_date": study.get("protocolSection", {}).get(
+                            "statusModule", {}).get("startDateStruct", {}).get("date", ""),
+                        "authors": [],
+                        "mesh_terms": [],
+                        "url": f"https://clinicaltrials.gov/study/{nct_id}",
+                    })
+
+        return results[:limit]
+
+
+def get_evidence_searcher() -> EvidenceSearcher:
+    return LiteratureEvidenceSearcher()
+
+
+# ---------------------------------------------------------------------------
+# Service endpoints
+# ---------------------------------------------------------------------------
 
 @app.get("/")
 async def root():
@@ -112,365 +350,517 @@ async def root():
     return {
         "message": "Medical Evidence Graph & Outcomes Insight Lab API",
         "status": "running",
-        "version": "1.0.0",
-        "models_loaded": True
+        "version": "2.0.0",
+        "risk_model_trained": risk_model_registry.is_ready(),
+    }
+
+
+@app.get("/health")
+@app.get("/api/health")
+async def health_check():
+    """Health check. Reports readiness honestly: a risk model that has not
+    been trained is not ready, whatever the process uptime says."""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "models_ready": {
+            "survival_analysis": True,
+            "causal_inference": True,
+            "risk_assessment": risk_model_registry.is_ready(),
+        },
+        "risk_model_version": risk_model_registry.version,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Risk models
+# ---------------------------------------------------------------------------
+
+@app.post("/api/models/risk/train")
+async def train_risk_models(request: TrainRiskModelRequest):
+    """Fit risk models on labelled patients and report held-out performance.
+
+    Splitting matters here: a random forest scored on its own training rows
+    reports near-perfect accuracy on any labels at all, including noise.
+    """
+    logger.info(f"Training risk models on {len(request.training_data)} patients")
+
+    frame = patients_to_frame(request.training_data)
+    features = feature_builder.build_patient_features(frame)
+
+    outcome_names = sorted({name for m in request.training_data for name in m.outcomes})
+    incomplete = [
+        name for name in outcome_names
+        if any(name not in m.outcomes for m in request.training_data)
+    ]
+    if incomplete:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Outcomes {incomplete} are missing for some patients; every "
+                   f"outcome must be recorded for every patient in the training set")
+
+    trained: Dict[str, RiskModel] = {}
+    skipped: Dict[str, str] = {}
+
+    for outcome in outcome_names:
+        values = np.array([m.outcomes[outcome] for m in request.training_data], dtype=float)
+        unique = np.unique(values)
+
+        if len(unique) < 2:
+            skipped[outcome] = (
+                f"constant outcome (every patient has {unique[0]}); nothing to learn")
+            continue
+
+        is_binary = set(unique) <= {0.0, 1.0}
+        stratify = values if is_binary else None
+        X_train, X_test, y_train, y_test = train_test_split(
+            features, values, test_size=request.test_size,
+            random_state=request.random_state, stratify=stratify)
+
+        if is_binary:
+            model = RandomForestClassifier(n_estimators=100, random_state=request.random_state)
+            model.fit(X_train, y_train)
+            metric_name = "roc_auc"
+            if len(np.unique(y_test)) < 2:
+                # AUC is undefined against a single-class holdout. Report that
+                # rather than a number that looks like a score.
+                metric_value = None
+            else:
+                metric_value = float(roc_auc_score(y_test, model.predict_proba(X_test)[:, 1]))
+            task = "classification"
+        else:
+            model = RandomForestRegressor(n_estimators=100, random_state=request.random_state)
+            model.fit(X_train, y_train)
+            metric_name = "r2"
+            metric_value = float(r2_score(y_test, model.predict(X_test)))
+            task = "regression"
+
+        trained[outcome] = RiskModel(
+            outcome=outcome,
+            model=model,
+            task=task,
+            feature_columns=list(features.columns),
+            feature_medians={c: float(features[c].median()) for c in features.columns},
+            metric_name=metric_name,
+            metric_value=metric_value,
+            n_train=len(X_train),
+            n_test=len(X_test),
+        )
+
+    if not trained:
+        raise HTTPException(
+            status_code=422,
+            detail=f"No model could be trained. {skipped}")
+
+    risk_model_registry.replace(trained)
+    logger.info(f"Trained {len(trained)} risk models, version {risk_model_registry.version}")
+
+    return {
+        "status": "success",
+        "model_version": risk_model_registry.version,
+        "trained_at": risk_model_registry.trained_at,
+        "models": {name: model.describe() for name, model in trained.items()},
+        "skipped_outcomes": skipped,
     }
 
 
 @app.post("/api/patients/risk-assessment")
 async def assess_patient_risk(patients: List[PatientInput]):
-    """Assess risk for one or more patients using enhanced ML models"""
-    logger.info(f"Assessing risk for {len(patients)} patients")
-    
-    try:
-        # Convert patient data to features for ML models
-        patient_data = []
-        for patient in patients:
-            patient_dict = {
-                'age': patient.demographics.age,
-                'sex': patient.demographics.sex.value,
-                'baseline_risk_score': patient.clinical_indicators.baseline_risk_score,
-                'comorbidity_count': patient.clinical_indicators.comorbidity_count,
-            }
-            
-            # Add optional fields
-            if patient.clinical_indicators.severity_score:
-                patient_dict['severity_score'] = patient.clinical_indicators.severity_score
-            if patient.clinical_indicators.lab_values:
-                for lab_name, lab_value in patient.clinical_indicators.lab_values.items():
-                    patient_dict[f'lab_{lab_name}'] = lab_value
-            
-            patient_data.append(patient_dict)
-        
-        # Convert to DataFrame
-        df = pd.DataFrame(patient_data)
-        
-        # Prepare outcomes for multi-task modeling
-        # For demonstration, we'll create synthetic outcomes
-        n_patients = len(df)
-        outcomes = {
-            'mortality': np.random.binomial(1, 0.1, n_patients),  # 10% mortality rate
-            'readmission': np.random.binomial(1, 0.15, n_patients),  # 15% readmission rate
-            'extended_stay': np.random.binomial(1, 0.2, n_patients)  # 20% extended stay
-        }
-        
-        # Train multi-task models
-        trained_models = enhanced_models.train_multi_task_model(df, outcomes)
-        
-        # Generate risk predictions
-        risk_assessments = []
-        for i, patient in enumerate(patients):
-            patient_risks = {
-                'patient_id': patient.patient_id or f"patient_{i}",
-                'assessed_at': datetime.utcnow().isoformat(),
-                'risks': {}
-            }
-            
-            # Calculate risks for each outcome
-            if len(df) > i:
-                patient_row = df.iloc[[i]]  # Select just this patient's row
-                for outcome_name, model_info in trained_models.items():
-                    if outcome_name in outcomes:
-                        model = model_info['model']
-                        try:
-                            risk_score = enhanced_models.predict_risk(model, patient_row)[0]
-                            patient_risks['risks'][outcome_name] = float(risk_score)
-                        except Exception as e:
-                            logger.warning(f"Could not predict risk for outcome {outcome_name}: {str(e)}")
-                            patient_risks['risks'][outcome_name] = 0.0
-            else:
-                logger.warning(f"No feature data available for patient {i}")
-                
-            risk_assessments.append(patient_risks)
-        
-        logger.info(f"Risk assessment completed for {len(risk_assessments)} patients")
-        return {
-            "status": "success",
-            "risk_assessments": risk_assessments,
-            "total_patients": len(risk_assessments)
-        }
-    
-    except Exception as e:
-        logger.error(f"Error in risk assessment: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """Score patients with the currently registered risk models."""
+    if not patients:
+        raise HTTPException(status_code=422, detail="No patients supplied")
 
+    if not risk_model_registry.is_ready():
+        # The alternative — training on generated labels inside this request
+        # — produced a mortality risk of 0.0 for every patient alongside
+        # "status": "success".
+        raise HTTPException(
+            status_code=503,
+            detail="No risk model has been trained. POST labelled patients to "
+                   "/api/models/risk/train first.")
+
+    logger.info(f"Assessing risk for {len(patients)} patients")
+
+    frame = patients_to_frame(patients)
+    features = feature_builder.build_patient_features(frame)
+
+    risk_assessments = []
+    for position, patient in enumerate(patients):
+        risks = {}
+        for outcome, risk_model in risk_model_registry.models.items():
+            aligned, imputed = risk_model.align(features.iloc[[position]])
+            if risk_model.task == "classification":
+                score = float(risk_model.model.predict_proba(aligned)[0, 1])
+            else:
+                score = float(risk_model.model.predict(aligned)[0])
+
+            # Every score travels with the evidence for trusting it.
+            risks[outcome] = {
+                "score": score,
+                "holdout_metric": risk_model.metric_name,
+                "holdout_value": risk_model.metric_value,
+                "imputed_features": imputed,
+            }
+
+        risk_assessments.append({
+            "patient_id": patient.patient_id or f"patient_{position}",
+            "assessed_at": datetime.now(timezone.utc).isoformat(),
+            "risks": risks,
+        })
+
+    return {
+        "status": "success",
+        "model_version": risk_model_registry.version,
+        "risk_assessments": risk_assessments,
+        "total_patients": len(risk_assessments),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Survival analysis
+# ---------------------------------------------------------------------------
 
 @app.post("/api/survival-analysis/kaplan-meier")
 async def kaplan_meier_analysis(request: SurvivalAnalysisRequest):
-    """Perform Kaplan-Meier survival analysis"""
+    """Kaplan-Meier estimate from the supplied follow-up.
+
+    Both inputs come from `follow_up` on each patient. The endpoint
+    previously ignored `patient_data` entirely and drew its curve from
+    np.random.exponential, making the response a function of the cohort
+    SIZE and the RNG state.
+    """
     logger.info(f"Running Kaplan-Meier analysis for {len(request.patient_data)} patients")
-    
+
+    duration = np.array([p.follow_up.observed_time_days for p in request.patient_data])
+    event = np.array([int(p.follow_up.event_observed) for p in request.patient_data])
+
+    if event.sum() == 0:
+        raise HTTPException(
+            status_code=422,
+            detail="No events observed in this cohort; a Kaplan-Meier curve "
+                   "would be flat at 1.0 and carries no information")
+
     try:
-        # Generate synthetic survival data for demonstration
-        n_patients = len(request.patient_data)
-        duration = np.random.exponential(2, n_patients)  # Time to event (years)
-        event = np.random.binomial(1, 0.4, n_patients)   # Whether event occurred
-        
-        # Perform Kaplan-Meier analysis
         time_points, survival_probs = survival_models.kaplan_meier_analysis(duration, event)
-        
-        result = {
-            "status": "success",
-            "time_horizon_days": request.time_horizon_days,
-            "survival_curve": {
-                "time_points": time_points,
-                "survival_probability": survival_probs
-            },
-            "stats": {
-                "median_survival": np.median(time_points) if time_points else None,
-                "total_patients": n_patients,
-                "events_occurred": int(sum(event))
-            }
-        }
-        
-        logger.info("Kaplan-Meier analysis completed successfully")
-        return result
-    
-    except Exception as e:
-        logger.error(f"Error in Kaplan-Meier analysis: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    at_horizon = [
+        survival for time_point, survival in zip(time_points, survival_probs)
+        if time_point <= request.time_horizon_days
+    ]
+
+    return {
+        "status": "success",
+        "time_horizon_days": request.time_horizon_days,
+        "survival_curve": {
+            "time_points": time_points,
+            "survival_probability": survival_probs,
+        },
+        "stats": {
+            "median_survival_days": median_survival_time(time_points, survival_probs),
+            "survival_at_horizon": at_horizon[-1] if at_horizon else None,
+            "total_patients": len(request.patient_data),
+            "events_occurred": int(event.sum()),
+            "censored": int(len(event) - event.sum()),
+            "max_follow_up_days": float(duration.max()),
+        },
+    }
 
 
 @app.post("/api/survival-analysis/cox-regression")
 async def cox_regression_analysis(request: SurvivalAnalysisRequest):
-    """Perform Cox proportional hazards regression"""
-    logger.info(f"Running Cox regression for {len(request.patient_data)} patients")
-    
-    try:
-        # Prepare data from patient inputs
-        data_rows = []
-        for patient in request.patient_data:
-            row = {
-                'age': patient.demographics.age,
-                'gender_encoded': 1 if patient.demographics.sex == SexEnum.male else 0,
-                'baseline_risk_score': patient.clinical_indicators.baseline_risk_score,
-                'comorbidity_count': patient.clinical_indicators.comorbidity_count,
-            }
-            
-            # Use the first patient's data as event indicator (for demonstration)
-            # In real implementation, this would come from the patient records
-            row['observed_time'] = np.random.exponential(2)  # Simulated survival time
-            row['event'] = np.random.binomial(1, 0.5)  # Simulated event occurrence
-            
-            data_rows.append(row)
-        
-        df = pd.DataFrame(data_rows)
-        
-        # Perform Cox regression
-        covariates = ['age', 'gender_encoded', 'baseline_risk_score', 'comorbidity_count']
-        result = survival_models.cox_regression_analysis(
-            df, 'observed_time', 'event', covariates
-        )
-        
-        response = {
-            "status": "success",
-            "c_index": result.c_index,
-            "hazard_ratios": result.hazard_ratios,
-            "p_values": result.p_values,
-            "confidence_intervals": {k: list(v) for k, v in result.confidence_intervals.items()},
-            "model_stats": {
-                "log_likelihood": result.log_likelihood,
-                "baseline_survival_points": len(result.baseline_survival),
-                "total_patients": len(request.patient_data)
-            }
-        }
-        
-        logger.info("Cox regression completed successfully")
-        return response
-    
-    except Exception as e:
-        logger.error(f"Error in Cox regression: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """Cox proportional hazards on the supplied covariates and follow-up.
 
+    The covariates were always real; the outcome was not. `observed_time`
+    and `event` were drawn per row from np.random, so the reported hazard
+    ratios described the association between a real covariate and noise.
+    """
+    logger.info(f"Running Cox regression for {len(request.patient_data)} patients")
+
+    frame = patients_to_frame(request.patient_data)
+    frame['gender_encoded'] = (frame['gender'] == 'M').astype(int)
+    frame['observed_time'] = [p.follow_up.observed_time_days for p in request.patient_data]
+    frame['event'] = [int(p.follow_up.event_observed) for p in request.patient_data]
+
+    covariates = ['age', 'gender_encoded', 'baseline_risk_score', 'comorbidity_count']
+    # Drop covariates with no variation: they cannot be estimated and would
+    # abort the whole fit.
+    usable = [c for c in covariates if frame[c].nunique() > 1]
+    dropped = [c for c in covariates if c not in usable]
+    if not usable:
+        raise HTTPException(
+            status_code=422,
+            detail="Every covariate is constant across this cohort; there is "
+                   "nothing for a Cox model to estimate")
+
+    try:
+        result = survival_models.cox_regression_analysis(
+            frame, 'observed_time', 'event', usable)
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return {
+        "status": "success",
+        "c_index": result.c_index,
+        "c_index_is_in_sample": True,
+        "hazard_ratios": result.hazard_ratios,
+        "p_values": result.p_values,
+        "confidence_intervals": {k: list(v) for k, v in result.confidence_intervals.items()},
+        "covariates_dropped_as_constant": dropped,
+        "model_stats": {
+            "log_likelihood": result.log_likelihood,
+            "baseline_survival_points": len(result.baseline_survival),
+            "total_patients": len(request.patient_data),
+            "events_observed": int(frame['event'].sum()),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Causal inference
+# ---------------------------------------------------------------------------
 
 @app.post("/api/causal-inference/ate-estimation")
 async def estimate_ate(request: CausalAnalysisRequest):
-    """Estimate Average Treatment Effect (ATE) for treatment-outcome relationship"""
+    """Average treatment effect from observed assignments and outcomes.
+
+    Treatment and outcome now come from the request. They were previously
+    synthesised — treatment from a threshold on the risk score, outcome
+    from np.random.binomial(1, 0.1 + 0.1 * treatment) — so the returned
+    "effect" was the 0.1 constant written into that line, recovered.
+    """
     logger.info(f"Estimating ATE for {len(request.patient_data)} patients")
-    
+
+    frame = patients_to_frame(request.patient_data)
+    frame['gender_encoded'] = (frame['gender'] == 'M').astype(int)
+    treatment = np.array([int(p.treatment_assigned) for p in request.patient_data])
+    outcome = np.array([p.outcome_value for p in request.patient_data])
+
+    if len(np.unique(treatment)) < 2:
+        raise HTTPException(
+            status_code=422,
+            detail="All patients are in the same treatment arm; a treatment "
+                   "effect cannot be estimated without a comparison group")
+
+    default_covariates = ['age', 'gender_encoded', 'baseline_risk_score', 'comorbidity_count']
+    covariates = request.confounders or default_covariates
+    missing = [c for c in covariates if c not in frame.columns]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Confounders {missing} are not available on these patients. "
+                   f"Available: {sorted(frame.columns)}")
+
+    usable = [c for c in covariates if frame[c].nunique() > 1]
+    if not usable:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Confounders {covariates} are constant across this cohort")
+
+    # estimate_ate reads a 'treatment' column off the frame for its
+    # regression-adjustment step, then overwrites it with the array.
+    frame['treatment'] = treatment
+
     try:
-        # Prepare data from patient inputs
-        data_rows = []
-        for patient in request.patient_data:
-            row = {
-                'age': patient.demographics.age,
-                'gender_encoded': 1 if patient.demographics.sex == SexEnum.male else 0,
-                'baseline_risk_score': patient.clinical_indicators.baseline_risk_score,
-                'comorbidity_count': patient.clinical_indicators.comorbidity_count,
-            }
-            
-            # For demonstration: assign treatment randomly based on risk
-            # In real implementation, this would come from actual patient records
-            row['treatment'] = 1 if patient.clinical_indicators.baseline_risk_score > 0.5 else 0
-            row['outcome'] = np.random.binomial(1, 0.1 + 0.1 * row['treatment'])  # Treatment effect
-            
-            # Add confounders if specified
-            for confounder in request.confounders:
-                if confounder not in row:
-                    row[confounder] = np.random.random()  # Random value for demo
-            
-            data_rows.append(row)
-        
-        df = pd.DataFrame(data_rows)
-        
-        # Estimate ATE
-        causal_results = causal_models.estimate_ate(
-            df,
-            df['treatment'].values,
-            df['outcome'].values,
-            [col for col in df.columns if col not in ['treatment', 'outcome']]
-        )
-        
-        response = {
-            "status": "success",
-            "treatment_variable": request.treatment_variable,
-            "outcome_variable": request.outcome_variable,
-            "ate_estimates": causal_results,
+        causal_results = causal_models.estimate_ate(frame, treatment, outcome, usable)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return {
+        "status": "success",
+        "treatment_variable": request.treatment_variable,
+        "outcome_variable": request.outcome_variable,
+        "ate_estimates": {k: float(v) for k, v in causal_results.items()},
+        "cohort": {
             "total_patients": len(request.patient_data),
-            "confounders_considered": request.confounders
+            "treated": int(treatment.sum()),
+            "control": int(len(treatment) - treatment.sum()),
+        },
+        "confounders_adjusted_for": usable,
+        "confounders_dropped_as_constant": [c for c in covariates if c not in usable],
+        "caveat": (
+            "Observational estimate. Adjustment covers the listed confounders "
+            "only; unmeasured confounding is not addressed."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cohort comparison
+# ---------------------------------------------------------------------------
+
+def compare_one_outcome(values_1: np.ndarray, values_2: np.ndarray, alpha: float) -> Dict[str, Any]:
+    """Run the appropriate two-sample test and report what was run.
+
+    Binary outcomes go to a chi-square test of a 2x2 table, or Fisher's
+    exact test when an expected cell is small. Continuous outcomes go to
+    Welch's t-test. The previous implementation ran no test at all: it
+    returned `cohorts_have_difference: True` and `p = 0.05` as literals.
+    """
+    is_binary = set(np.unique(np.concatenate([values_1, values_2]))) <= {0.0, 1.0}
+
+    if is_binary:
+        table = np.array([
+            [int(values_1.sum()), int(len(values_1) - values_1.sum())],
+            [int(values_2.sum()), int(len(values_2) - values_2.sum())],
+        ])
+        if table.sum(axis=0).min() == 0 or table.sum(axis=1).min() == 0:
+            return {
+                "test": None,
+                "p_value": None,
+                "significant": None,
+                "reason": "a cohort has no variation in this outcome; no test is applicable",
+                "cohort_1_rate": float(values_1.mean()),
+                "cohort_2_rate": float(values_2.mean()),
+            }
+
+        expected = stats.contingency.expected_freq(table)
+        if expected.min() < 5:
+            _, p_value = stats.fisher_exact(table)
+            test_name = "fisher_exact"
+        else:
+            _, p_value, _, _ = stats.chi2_contingency(table, correction=False)
+            test_name = "chi2_contingency"
+
+        rate_1, rate_2 = float(values_1.mean()), float(values_2.mean())
+        return {
+            "test": test_name,
+            "p_value": float(p_value),
+            "significant": bool(p_value < alpha),
+            "cohort_1_rate": rate_1,
+            "cohort_2_rate": rate_2,
+            "risk_difference": rate_2 - rate_1,
+            "risk_ratio": (rate_2 / rate_1) if rate_1 > 0 else None,
         }
-        
-        logger.info("ATE estimation completed successfully")
-        return response
-    
-    except Exception as e:
-        logger.error(f"Error in ATE estimation: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+
+    statistic, p_value = stats.ttest_ind(values_1, values_2, equal_var=False)
+    return {
+        "test": "welch_t",
+        "statistic": float(statistic),
+        "p_value": float(p_value),
+        "significant": bool(p_value < alpha),
+        "cohort_1_mean": float(values_1.mean()),
+        "cohort_2_mean": float(values_2.mean()),
+        "mean_difference": float(values_2.mean() - values_1.mean()),
+    }
+
+
+def summarise_cohort(members: List[CohortMember]) -> Dict[str, Any]:
+    frame = patients_to_frame(members)
+    gender_counts = frame['gender'].value_counts().to_dict()
+    return {
+        "size": len(members),
+        "characteristics": {
+            "mean_age": float(frame['age'].mean()),
+            "mean_baseline_risk_score": float(frame['baseline_risk_score'].mean()),
+            "mean_comorbidity_count": float(frame['comorbidity_count'].mean()),
+            "gender_distribution": {k: int(v) for k, v in gender_counts.items()},
+        },
+    }
 
 
 @app.post("/api/cohorts/compare")
 async def compare_cohorts(request: CohortAnalysisRequest):
-    """Compare two patient cohorts on multiple outcomes"""
-    logger.info(f"Comparing cohorts: {len(request.patient_cohort)} vs {len(request.comparator_cohort or [])} patients")
-    
-    try:
-        # Process primary cohort
-        cohort1_data = []
-        for patient in request.patient_cohort:
-            row = {
-                'age': patient.demographics.age,
-                'gender': patient.demographics.sex.value,
-                'baseline_risk_score': patient.clinical_indicators.baseline_risk_score,
-                'comorbidity_count': patient.clinical_indicators.comorbidity_count,
-            }
-            cohort1_data.append(row)
-        
-        # Process comparator cohort if provided
-        cohort2_data = []
-        if request.comparator_cohort:
-            for patient in request.comparator_cohort:
-                row = {
-                    'age': patient.demographics.age,
-                    'gender': patient.demographics.sex.value,
-                    'baseline_risk_score': patient.clinical_indicators.baseline_risk_score,
-                    'comorbidity_count': patient.clinical_indicators.comorbidity_count,
-                }
-                cohort2_data.append(row)
-        
-        # For demonstration, generate synthetic outcomes
-        cohort1_outcomes = {}
-        cohort2_outcomes = {}
-        
-        for outcome in request.outcome_variables or ['mortality', 'readmission']:
-            n1 = len(cohort1_data)
-            n2 = len(cohort2_data)
-            
-            # Generate random outcomes for demonstration
-            cohort1_outcomes[outcome] = np.random.binomial(1, 0.15, n1).tolist()
-            if n2 > 0:
-                cohort2_outcomes[outcome] = np.random.binomial(1, 0.20 if outcome == 'mortality' else 0.18, n2).tolist()
-        
-        response = {
-            "status": "success",
-            "cohort_comparison": {
-                "cohort_1": {
-                    "size": len(cohort1_data),
-                    "characteristics": {
-                        "mean_age": float(np.mean([p['age'] for p in cohort1_data])) if cohort1_data else 0,
-                        "gender_distribution": {},  # Would calculate actual distribution in real implementation
-                    },
-                    "outcomes": cohort1_outcomes
-                },
-                "cohort_2": {
-                    "size": len(cohort2_data),
-                    "characteristics": {
-                        "mean_age": float(np.mean([p['age'] for p in cohort2_data])) if cohort2_data else 0,
-                        "gender_distribution": {}
-                    } if cohort2_data else None,
-                    "outcomes": cohort2_outcomes if cohort2_data else {}
-                },
-                "comparison_metrics": {
-                    "cohorts_have_difference": True,  # Placeholder for actual statistical tests
-                    "statistical_significance": 0.05  # Placeholder p-value
-                }
-            }
-        }
-        
-        logger.info("Cohort comparison completed successfully")
-        return response
-    
-    except Exception as e:
-        logger.error(f"Error in cohort comparison: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """Compare two cohorts on their observed outcomes, with real tests."""
+    if not request.comparator_cohort:
+        raise HTTPException(
+            status_code=422,
+            detail="A comparator cohort is required; there is nothing to "
+                   "compare a single cohort against")
 
+    logger.info(
+        f"Comparing cohorts: {len(request.patient_cohort)} vs "
+        f"{len(request.comparator_cohort)} patients")
 
-@app.get("/api/health")
-async def health_check():
-    """Health check endpoint"""
+    shared = sorted(
+        {name for m in request.patient_cohort for name in m.outcomes}
+        & {name for m in request.comparator_cohort for name in m.outcomes}
+    )
+    requested = request.outcome_variables or shared
+    missing = [name for name in requested if name not in shared]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Outcomes {missing} are not recorded in both cohorts. "
+                   f"Available in both: {shared}")
+    if not requested:
+        raise HTTPException(
+            status_code=422,
+            detail="The two cohorts share no outcome to compare")
+
+    comparisons = {}
+    for outcome in requested:
+        values_1 = np.array(
+            [m.outcomes[outcome] for m in request.patient_cohort if outcome in m.outcomes],
+            dtype=float)
+        values_2 = np.array(
+            [m.outcomes[outcome] for m in request.comparator_cohort if outcome in m.outcomes],
+            dtype=float)
+        comparisons[outcome] = compare_one_outcome(values_1, values_2, request.alpha)
+
+    tested = [c for c in comparisons.values() if c["significant"] is not None]
+
     return {
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
-        "models_ready": {
-            "survival_analysis": True,
-            "causal_inference": True,
-            "enhanced_outcomes": True
-        }
+        "status": "success",
+        "cohort_comparison": {
+            "cohort_1": summarise_cohort(request.patient_cohort),
+            "cohort_2": summarise_cohort(request.comparator_cohort),
+            "outcomes": comparisons,
+            "comparison_metrics": {
+                "alpha": request.alpha,
+                "outcomes_tested": len(tested),
+                # Derived from the tests actually run, not asserted.
+                "cohorts_have_difference": any(c["significant"] for c in tested) if tested else None,
+                "note": (
+                    "Unadjusted comparisons. With several outcomes, consider "
+                    "correcting for multiple comparisons before acting on any "
+                    "single p-value."
+                ),
+            },
+        },
     }
 
 
-# Additional endpoints for clinical decision support
-@app.post("/api/evidence/search")
+# ---------------------------------------------------------------------------
+# Evidence search
+# ---------------------------------------------------------------------------
+
+@app.get("/api/evidence/search")
 async def search_evidence(
     query: str = Query(..., min_length=1, description="Search query"),
     limit: int = Query(10, ge=1, le=100, description="Number of results to return"),
-    filters: str = Query('{}', description="JSON filters for search")
+    filters: str = Query('{}', description="JSON filters for search"),
+    searcher: EvidenceSearcher = Depends(get_evidence_searcher),
 ):
-    """Search medical evidence in the knowledge graph"""
+    """Search published evidence.
+
+    GET, because it has no request body — this also matches what
+    `src/frontend_interface.py` has always called, which the previous POST
+    declaration answered with 405.
+    """
     try:
-        # Parse filters
         parsed_filters = json.loads(filters)
-        
-        # Simulate evidence search results
-        mock_evidence = [
-            {
-                "id": f"evidence_{i}",
-                "title": f"Medical Evidence Title {i}: {query}",
-                "abstract": f"Abstract for evidence related to {query}. This is a synthetic result.",
-                "source": ["PubMed", "ClinicalTrial", "Guideline"][i % 3],
-                "pub_date": f"202{2 + i % 3}-{1 + i % 12:02d}-15",
-                "relevance_score": round(1.0 - (i * 0.1), 2),
-                "entities": {
-                    "conditions": [query.replace(" ", "_").lower()] if query else [],
-                    "interventions": ["treatment", "therapy", "intervention"],
-                    "outcomes": ["mortality", "survival", "effectiveness"]
-                }
-            }
-            for i in range(min(limit, 10))  # Up to 10 mock results
-        ]
-        
-        return {
-            "status": "success",
-            "query": query,
-            "filters": parsed_filters,
-            "results": mock_evidence[:limit],
-            "total_results": len(mock_evidence)
-        }
-    
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON in filters parameter")
-    except Exception as e:
-        logger.error(f"Error in evidence search: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+
+    try:
+        results = await searcher.search(query, limit)
+    except RuntimeError as e:
+        # An upstream failure is reported as one. Returning [] here would be
+        # read as "no evidence exists for this query".
+        logger.error(f"Evidence search failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Evidence source unavailable: {e}") from e
+
+    return {
+        "status": "success",
+        "query": query,
+        "filters": parsed_filters,
+        "results": results,
+        "total_results": len(results),
+    }
 
 
 if __name__ == "__main__":

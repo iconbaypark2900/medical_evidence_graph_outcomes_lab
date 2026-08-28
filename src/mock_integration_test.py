@@ -231,7 +231,7 @@ import os
 current_dir = os.path.dirname(__file__)
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
-from data_ingestion import ingest_medical_evidence, extract_entities_from_text
+from src.data_ingestion import ingest_medical_evidence, extract_entities_from_text
 
 
 class MockEvidenceStorage:

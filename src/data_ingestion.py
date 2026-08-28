@@ -59,78 +59,137 @@ class PubMedFetcher:
                 f"db=pubmed&id={ids}&retmode=xml")
     
     async def search_pubmed(self, query: str, max_results: int = 10) -> List[str]:
-        """Search PubMed and return PMIDs"""
+        """Search PubMed and return PMIDs.
+
+        Raises RuntimeError on any transport or API failure. An empty list is
+        reserved for the one case where it is true: the query matched nothing.
+        """
         try:
             search_url = self._build_search_url(query, max_results)
             async with self.session.get(search_url) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    id_list = data.get("esearchresult", {}).get("idlist", [])
-                    logger.info(f"Found {len(id_list)} results for query: {query}")
-                    return id_list
-                else:
-                    logger.error(f"PubMed search failed with status {response.status}")
-                    return []
+                if response.status != 200:
+                    # A 429 (rate limit) or 5xx used to return [] here, which
+                    # is indistinguishable from an exhaustive search that
+                    # found nothing -- and silently under-populates the
+                    # evidence graph everything downstream reasons over.
+                    raise RuntimeError(
+                        f"PubMed search for {query!r} returned HTTP "
+                        f"{response.status}")
+                data = await response.json()
+                id_list = data.get("esearchresult", {}).get("idlist", [])
+                logger.info(f"Found {len(id_list)} results for query: {query}")
+                return id_list
+        except RuntimeError:
+            raise
         except Exception as e:
             # An empty list means "this query matched no articles", which is a
             # real and common answer. Returning it on a network or API failure
             # makes a broken ingest indistinguishable from an exhaustive search
-            # that found nothing — and the second silently under-populates the
-            # evidence graph everything downstream reasons over.
+            # that found nothing.
             logger.error(f"Error searching PubMed: {e}")
             raise RuntimeError(f"PubMed search failed for {query!r}: {e}") from e
-    
+
+    @staticmethod
+    def _text_of(element) -> str:
+        """Flatten an element's text, including inline markup.
+
+        PubMed titles and abstracts carry <i>, <sup>, <b> and similar, so
+        reading `.text` alone truncates at the first tag.
+        """
+        if element is None:
+            return ""
+        return " ".join("".join(element.itertext()).split())
+
+    @classmethod
+    def _parse_authors(cls, article) -> List[str]:
+        """Author names from an <AuthorList>.
+
+        The given name lives in <ForeName>. An earlier version looked for
+        <FirstName>, which does not exist in the NLM DTD, so the guard never
+        passed and every ingested article had an empty author list.
+        """
+        authors = []
+        for author in article.findall(".//AuthorList/Author"):
+            collective = cls._text_of(author.find("CollectiveName"))
+            if collective:
+                authors.append(collective)
+                continue
+
+            last_name = cls._text_of(author.find("LastName"))
+            if not last_name:
+                continue
+
+            # Fall back to initials when the given name is not supplied.
+            given = cls._text_of(author.find("ForeName")) or cls._text_of(
+                author.find("Initials"))
+            authors.append(f"{given} {last_name}".strip())
+        return authors
+
+    @classmethod
+    def _parse_abstract(cls, article) -> str:
+        """Join every section of a structured abstract.
+
+        Reading only the first <AbstractText> dropped everything after
+        BACKGROUND -- including CONCLUSIONS, which is where the clinical
+        finding actually lives.
+        """
+        sections = []
+        for section in article.findall(".//Abstract/AbstractText"):
+            text = cls._text_of(section)
+            if not text:
+                continue
+            label = section.get("Label")
+            sections.append(f"{label}: {text}" if label else text)
+        return " ".join(sections)
+
+    @classmethod
+    def _parse_pub_date(cls, article) -> str:
+        """Publication year, falling back to the free-text MedlineDate."""
+        year = cls._text_of(article.find(".//Journal//PubDate/Year"))
+        if year:
+            return year
+        return cls._text_of(article.find(".//Journal//PubDate/MedlineDate"))
+
     async def fetch_pubmed_articles(self, pmids: List[str]) -> List[Dict[str, Any]]:
-        """Fetch full article details from PubMed"""
+        """Fetch full article details from PubMed."""
         if not pmids:
             return []
-        
+
         try:
             fetch_url = self._build_fetch_url(pmids)
             async with self.session.get(fetch_url) as response:
-                if response.status == 200:
-                    content = await response.text()
-                    root = ET.fromstring(content)
-                    
-                    articles = []
-                    for article in root.findall(".//PubmedArticle"):
-                        pmid_elem = article.find(".//PMID")
-                        title_elem = article.find(".//ArticleTitle")
-                        abstract_elem = article.find(".//AbstractText")
-                        journal_elem = article.find(".//Journal/Title")
-                        pub_date_elem = article.find(".//PubDate/Year")
-                        
-                        # Extract authors
-                        authors = []
-                        for author in article.findall(".//Author"):
-                            last_name = author.find("LastName")
-                            first_name = author.find("FirstName")
-                            if last_name is not None and first_name is not None:
-                                authors.append(f"{first_name.text} {last_name.text}")
-                        
-                        # Extract MeSH terms
-                        mesh_terms = []
-                        for mesh_term in article.findall(".//MeshHeading/DescriptorName"):
-                            mesh_terms.append(mesh_term.text)
-                        
-                        article_data = {
-                            "pmid": pmid_elem.text if pmid_elem is not None else "",
-                            "title": title_elem.text if title_elem is not None else "",
-                            "abstract": abstract_elem.text if abstract_elem is not None else "",
-                            "journal": journal_elem.text if journal_elem is not None else "",
-                            "pub_date": pub_date_elem.text if pub_date_elem is not None else "",
-                            "authors": authors,
-                            "mesh_terms": mesh_terms,
-                            "source": "PubMed"
-                        }
-                        
-                        articles.append(article_data)
-                    
-                    logger.info(f"Fetched {len(articles)} articles from PubMed")
-                    return articles
-                else:
-                    logger.error(f"PubMed fetch failed with status {response.status}")
-                    return []
+                if response.status != 200:
+                    raise RuntimeError(
+                        f"PubMed fetch for {len(pmids)} pmids returned HTTP "
+                        f"{response.status}")
+
+                content = await response.text()
+                root = ET.fromstring(content)
+
+                articles = []
+                for article in root.findall(".//PubmedArticle"):
+                    # Scope the PMID lookup to the citation: a bare .//PMID
+                    # can also match ids inside reference and comment lists.
+                    pmid = self._text_of(article.find("./MedlineCitation/PMID"))
+
+                    articles.append({
+                        "pmid": pmid,
+                        "title": self._text_of(article.find(".//ArticleTitle")),
+                        "abstract": self._parse_abstract(article),
+                        "journal": self._text_of(article.find(".//Journal/Title")),
+                        "pub_date": self._parse_pub_date(article),
+                        "authors": self._parse_authors(article),
+                        "mesh_terms": [
+                            self._text_of(term)
+                            for term in article.findall(".//MeshHeading/DescriptorName")
+                        ],
+                        "source": "PubMed",
+                    })
+
+                logger.info(f"Fetched {len(articles)} articles from PubMed")
+                return articles
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"Error fetching PubMed articles: {e}")
             raise RuntimeError(
@@ -158,19 +217,25 @@ class ClinicalTrialsFetcher:
                 f"&page.size={max_results}&format=json")
     
     async def search_trials(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
-        """Search ClinicalTrials.gov and return study details"""
+        """Search ClinicalTrials.gov and return study details.
+
+        As with PubMed, an empty list means the query matched no studies.
+        Any transport or API failure raises.
+        """
         try:
             search_url = self._build_search_url(query, max_results)
             async with self.session.get(search_url) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    studies = data.get("studies", [])
-                    
-                    logger.info(f"Found {len(studies)} clinical trials for query: {query}")
-                    return studies
-                else:
-                    logger.error(f"ClinicalTrials search failed with status {response.status}")
-                    return []
+                if response.status != 200:
+                    raise RuntimeError(
+                        f"ClinicalTrials.gov search for {query!r} returned "
+                        f"HTTP {response.status}")
+                data = await response.json()
+                studies = data.get("studies", [])
+
+                logger.info(f"Found {len(studies)} clinical trials for query: {query}")
+                return studies
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"Error searching ClinicalTrials.gov: {e}")
             raise RuntimeError(f"ClinicalTrials.gov search failed: {e}") from e

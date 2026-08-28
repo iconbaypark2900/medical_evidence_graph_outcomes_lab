@@ -1,5 +1,23 @@
 # ✅ PHASE 3 COMPLETE: User Interface & Clinical Decision Support System
 
+> **Correction (2026-08-28).** The API described below has changed
+> substantially, because as written every analysis endpoint discarded the
+> patient data it was given and generated replacement outcomes with
+> `np.random` before returning `"status": "success"`. Risk assessment
+> returned a mortality risk of `0.0` for every patient.
+>
+> Endpoints now require the observed outcome as part of the request and
+> reject it (422) otherwise; risk assessment requires a model trained in
+> advance via the new `POST /api/models/risk/train` and returns 503 until
+> one exists; cohort comparison runs a named statistical test instead of
+> returning a hardcoded `p = 0.05`; and evidence search retrieves live from
+> PubMed and ClinicalTrials.gov over `GET` rather than returning templated
+> strings over `POST`.
+>
+> See the **Usage** section of [`README.md`](README.md) for the current
+> surface and `tests/test_api_backend.py` for what is guaranteed.
+
+
 ## Overview
 Phase 3 of the Medical Evidence Graph & Outcomes Insight Lab has been successfully completed, implementing comprehensive user interfaces and clinical decision support functionality.
 

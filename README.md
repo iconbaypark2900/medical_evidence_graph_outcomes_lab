@@ -55,33 +55,109 @@ The Medical Evidence Graph & Outcomes Insight Lab is a sophisticated platform de
 - Identifies optimization opportunities
 - Highlights outdated recommendations based on new evidence
 
+## Status
+
+| Area | State |
+|---|---|
+| Survival analysis (Kaplan-Meier, Cox) | working; tested against simulated cohorts with known hazard ratios |
+| Causal inference (propensity matching, ATE) | working; tested against a known treatment effect under confounding |
+| Risk models (train / score, held-out metrics) | working, via `/api/models/risk/train` |
+| Evidence retrieval (PubMed, ClinicalTrials.gov) | working, live |
+| Streamlit clinical frontend | working against the API above |
+| Evidence **graph** (Neo4j) and graph-RAG | **not wired up** — `src/graph_rag_service/main.py` retrieval is still `MockOpenSearch` / `MockQdrant` / `MockNeo4j` |
+| Pathway & guideline service | not exercised |
+| Vault / OPA / Presidio / MLflow / Langfuse | not integrated |
+
+Real Neo4j, OpenSearch and Qdrant clients exist in `src/integration.py` and
+`src/db_connection_test.py`, but nothing in the API path calls them yet.
+
 ## Setup
 
-1. Clone the repository
-2. Install dependencies: `pip install -r requirements.txt`
-3. Set up required services (Neo4j, OpenSearch, Qdrant)
-4. Configure settings in `config/settings.json`
-5. Run individual services as needed
+### Development environment (this is the path that is tested)
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e '.[dev,ui]'
+.venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch  # CPU-only
+.venv/bin/python -m pytest
+```
+
+`pyproject.toml` installs only the dependencies the exercised code paths
+import. It is deliberately narrower than `requirements.txt`, which lists the
+full intended stack (Neo4j, OpenSearch, Qdrant, transformers, spacy, MLflow,
+DoWhy, EconML) — none of which any tested path imports yet.
+
+See [`tests/README.md`](tests/README.md) for what the suite covers and why
+several tests assert that the same request twice returns the same answer.
+
+### Backing services
+
+```bash
+docker compose up -d          # Neo4j, OpenSearch, Qdrant
+```
+
+Only needed for the graph work listed as not wired up above. The API,
+the analysis library and the frontend run without them.
 
 ## Usage
 
-Each service can be run independently or as part of the integrated pipeline:
+### API
 
 ```bash
-# Run evidence ingestion service
-cd src/evidence_ingestion_service && python main.py
+.venv/bin/python -m uvicorn src.api_backend:app --port 8000
+```
 
-# Run evidence graph service
-cd src/evidence_graph_service && python main.py
+Interactive docs at `http://localhost:8000/docs`.
 
-# Run graph-RAG service
-cd src/graph_rag_service && python main.py
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/health` | Readiness, including whether a risk model has been trained |
+| `POST /api/models/risk/train` | Fit risk models on labelled patients; returns held-out AUC / R² |
+| `POST /api/patients/risk-assessment` | Score patients with the trained model (503 until one exists) |
+| `POST /api/survival-analysis/kaplan-meier` | KM curve, median survival, survival at a horizon |
+| `POST /api/survival-analysis/cox-regression` | Hazard ratios with 95% CIs and p-values |
+| `POST /api/causal-inference/ate-estimation` | ATE: unadjusted, matched, regression-adjusted |
+| `POST /api/cohorts/compare` | Two-cohort comparison with a named statistical test |
+| `GET /api/evidence/search` | Live PubMed + ClinicalTrials.gov retrieval |
 
-# Run outcomes analytics service
-cd src/outcomes_analytics_service && python main.py
+**Every analysis endpoint requires the observed outcome as part of the
+request.** A survival request carries `follow_up` per patient, a causal
+request carries `treatment_assigned` and `outcome_value`, a cohort
+comparison carries named `outcomes`. Omitting them is a 422, not a result.
+This is the central design rule of the API: it analyses the data you gave
+it, or it fails. It does not generate substitutes.
 
-# Run pathway & guideline service
-cd src/pathway_guideline_service && python main.py
+Risk assessment additionally requires a model to have been trained, and
+returns each score together with that model's held-out performance and a
+list of any features that had to be imputed.
+
+### Frontend
+
+```bash
+.venv/bin/python -m streamlit run src/frontend_interface.py
+```
+
+Cohorts are supplied as CSV uploads. Required columns are listed on each
+page; `src/cohort_io.py` converts them and reports the offending row and
+column when a file cannot be used.
+
+### Analysis library directly
+
+```bash
+.venv/bin/python -m src.enhanced_ml_models   # survival + causal + deep survival demo
+.venv/bin/python -m src.phase2_demo          # fuller Phase 2 walkthrough
+```
+
+### Other services
+
+The remaining services under `src/` are not yet wired into the API:
+
+```bash
+.venv/bin/python main.py evidence_ingestion_service
+.venv/bin/python main.py evidence_graph_service
+.venv/bin/python main.py graph_rag_service
+.venv/bin/python main.py outcomes_analytics_service
+.venv/bin/python main.py pathway_guideline_service
 ```
 
 ## Security, Privacy & Governance

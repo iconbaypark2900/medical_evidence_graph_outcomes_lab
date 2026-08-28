@@ -72,109 +72,121 @@ class SurvivalAnalysisModels:
     
     def cox_regression_analysis(self, data: pd.DataFrame, duration_col: str, event_col: str, 
                                covariate_cols: List[str]) -> SurvivalAnalysisResult:
-        """Perform Cox proportional hazards regression"""
+        """Perform Cox proportional hazards regression.
+
+        Raises:
+            KeyError: a requested column is not in `data` (caller error).
+            ValueError: no usable rows remain after cleaning (data error).
+            RuntimeError: the model itself failed to fit (estimator error).
+
+        Note that `c_index` is computed on the same rows the model was fitted
+        on. It is an in-sample fit statistic, not an estimate of how the model
+        will discriminate on unseen patients, and must not be reported as one.
+        """
+        # Validation runs OUTSIDE the try below. A missing column is a mistake
+        # at the call site, not a failure of the estimator, and the caller can
+        # only act on that distinction if the exception type survives.
+        required_cols = [duration_col, event_col] + covariate_cols
+        missing_cols = [col for col in required_cols if col not in data.columns]
+        if missing_cols:
+            # Do NOT return an empty SurvivalAnalysisResult. A result object
+            # with no hazard ratios and c_index=0.0 is indistinguishable from
+            # a model that genuinely found no predictive signal — and 0.5 is
+            # the c-index of a coin flip, so 0.0 is not even a neutral value
+            # to fabricate.
+            logger.error(f"Missing columns for Cox regression: {missing_cols}")
+            raise KeyError(
+                f"Cox regression requires columns {missing_cols}, which are "
+                f"not in the supplied data (has: {list(data.columns)})")
+
+        model_data = data[required_cols].copy().dropna()
+        if len(model_data) == 0:
+            raise ValueError(
+                f"No rows remain after dropping missing values across "
+                f"{required_cols}; {len(data)} rows were supplied")
+
+        # Encode any non-numeric covariates; lifelines requires numeric input.
+        for col in covariate_cols:
+            if model_data[col].dtype == 'object':
+                from sklearn.preprocessing import LabelEncoder
+                le = LabelEncoder()
+                model_data[col] = le.fit_transform(model_data[col].astype(str))
+            model_data[col] = pd.to_numeric(model_data[col], errors='coerce')
+
+        model_data = model_data.dropna()
+        if len(model_data) == 0:
+            raise ValueError(
+                f"No rows remain after coercing {covariate_cols} to numeric; "
+                f"check for non-numeric values in the covariates")
+
         try:
-            # Prepare data - ensure all required columns exist
-            required_cols = [duration_col, event_col] + covariate_cols
-            missing_cols = [col for col in required_cols if col not in data.columns]
-            if missing_cols:
-                # Do NOT return an empty SurvivalAnalysisResult. A result object
-                # with no hazard ratios and c_index=0.0 is indistinguishable from
-                # a model that genuinely found no predictive signal — and 0.5 is
-                # the c-index of a coin flip, so 0.0 is not even a neutral value
-                # to fabricate. A missing column is a caller error; say so.
-                logger.error(f"Missing columns for Cox regression: {missing_cols}")
-                raise KeyError(
-                    f"Cox regression requires columns {missing_cols}, which are "
-                    f"not in the supplied data (has: {list(data.columns)})")
-            
-            model_data = data[required_cols].copy().dropna()
-            
-            if len(model_data) == 0:
-                raise ValueError("No data available after cleaning")
-            
-            # Check for and convert non-numeric columns
-            for col in covariate_cols:
-                if model_data[col].dtype == 'object':
-                    from sklearn.preprocessing import LabelEncoder
-                    le = LabelEncoder()
-                    model_data[col] = le.fit_transform(model_data[col].astype(str))
-            
-            # Verify all columns are numeric
-            for col in covariate_cols:
-                model_data[col] = pd.to_numeric(model_data[col], errors='coerce')
-            
-            # Remove any rows with NaN that might have resulted from conversion
-            model_data = model_data.dropna()
-            
-            if len(model_data) == 0:
-                raise ValueError("No valid numeric data after processing")
-                
-            # Fit Cox model
             self.cox_model.fit(model_data, duration_col=duration_col, event_col=event_col)
-            
-            # Extract results
-            hazard_ratios = {}
-            p_values = {}
-            confidence_intervals = {}
-            
-            # Get the parameters index to see what was fitted
-            if hasattr(self.cox_model, 'params_'):
-                fitted_params = self.cox_model.params_.index.tolist()
-                # The model may have transformed column names internally, so we just use what was fitted
-                for param in fitted_params:
-                    if param in self.cox_model.hazard_ratios_:
-                        hazard_ratios[param] = self.cox_model.hazard_ratios_[param]
-                        p_values[param] = self.cox_model.summary.loc[param, 'p']
-                        # Access confidence intervals properly
-                        if 'exp(coef) lower 95%' in self.cox_model.confidence_intervals_.columns:
-                            hr_conf_lower = self.cox_model.confidence_intervals_.loc[param, 'exp(coef) lower 95%']
-                            hr_conf_upper = self.cox_model.confidence_intervals_.loc[param, 'exp(coef) upper 95%']
-                            confidence_intervals[param] = (hr_conf_lower, hr_conf_upper)
-                        else:
-                            # Fallback if confidence columns are missing
-                            confidence_intervals[param] = (0, 0)
-            
-            # Calculate C-index (concordance index)
-            c_index = self.cox_model.score(model_data, scoring_method="concordance_index")
-            
-            # Extract log-likelihood
-            log_likelihood = self.cox_model.log_likelihood_
-            
-            # Baseline survival function (handle case where it might be empty)
-            try:
-                baseline_survival = self.cox_model.baseline_survival_['baseline survival_'].values.tolist()
-                time_points = self.cox_model.baseline_survival_.index.values.tolist()
-                survival_probabilities = self.cox_model.baseline_survival_['baseline survival_'].values.tolist()
-            except:
-                baseline_survival = []
-                time_points = []
-                survival_probabilities = []
-            
-            result = SurvivalAnalysisResult(
-                hazard_ratios=hazard_ratios,
-                p_values=p_values,
-                confidence_intervals=confidence_intervals,
-                c_index=c_index,
-                log_likelihood=log_likelihood,
-                baseline_survival=baseline_survival,
-                time_points=time_points,
-                survival_probabilities=survival_probabilities
-            )
-            
-            self.fitted = True
-            return result
-            
         except Exception as e:
             # A SurvivalAnalysisResult with no hazard ratios and c_index=0.0 is
             # not an empty result — it is a claim: "no covariate predicts
             # survival, and the model discriminates worse than a coin flip"
             # (a c-index of 0.5 is chance; 0.0 is perfectly inverted). Returning
             # that because the fit crashed turns a bug into a clinical finding.
-            logger.error(f"Error in Cox regression analysis: {str(e)}")
+            logger.error(f"Error in Cox regression analysis: {e}")
             raise RuntimeError(
-                f"Cox regression failed on {len(data)} rows with covariates "
+                f"Cox regression failed on {len(model_data)} rows with covariates "
                 f"{covariate_cols}: {e}") from e
+
+        summary = self.cox_model.summary
+        # Effect estimates and their intervals both come from `summary`.
+        # lifelines' `confidence_intervals_` holds intervals on the log-hazard
+        # scale under the names '95% lower-bound'/'95% upper-bound'; reading it
+        # with the exp(coef) names silently misses and used to yield (0, 0) for
+        # every covariate — the claim "the hazard ratio is exactly zero, with
+        # certainty". Fail loudly instead of substituting a number.
+        required_summary_cols = ['exp(coef)', 'p', 'exp(coef) lower 95%', 'exp(coef) upper 95%']
+        missing_summary_cols = [c for c in required_summary_cols if c not in summary.columns]
+        if missing_summary_cols:
+            raise RuntimeError(
+                f"lifelines {lifelines.__version__} summary is missing "
+                f"{missing_summary_cols}; cannot report hazard ratios without "
+                f"their confidence intervals")
+
+        hazard_ratios = {}
+        p_values = {}
+        confidence_intervals = {}
+        for param in self.cox_model.params_.index:
+            hazard_ratios[param] = float(summary.loc[param, 'exp(coef)'])
+            p_values[param] = float(summary.loc[param, 'p'])
+            confidence_intervals[param] = (
+                float(summary.loc[param, 'exp(coef) lower 95%']),
+                float(summary.loc[param, 'exp(coef) upper 95%']),
+            )
+
+        c_index = self.cox_model.score(model_data, scoring_method="concordance_index")
+        log_likelihood = self.cox_model.log_likelihood_
+
+        # Single-column frame; index by position rather than by a literal name
+        # so a rename upstream surfaces as a shape error rather than as an
+        # empty curve. The previous code asked for 'baseline survival_' (the
+        # column is 'baseline survival') behind a bare `except:`, so every
+        # successful fit silently returned an empty baseline curve.
+        baseline = self.cox_model.baseline_survival_
+        if baseline.shape[1] != 1:
+            raise RuntimeError(
+                f"Expected a single baseline survival column, got "
+                f"{list(baseline.columns)}")
+        baseline_survival = baseline.iloc[:, 0].to_numpy().tolist()
+        time_points = baseline.index.to_numpy().tolist()
+
+        result = SurvivalAnalysisResult(
+            hazard_ratios=hazard_ratios,
+            p_values=p_values,
+            confidence_intervals=confidence_intervals,
+            c_index=c_index,
+            log_likelihood=log_likelihood,
+            baseline_survival=baseline_survival,
+            time_points=time_points,
+            survival_probabilities=baseline_survival,
+        )
+
+        self.fitted = True
+        return result
 
 
 class CausalInferenceModels:
@@ -288,110 +300,53 @@ class CausalInferenceModels:
             raise RuntimeError(f"ATE estimation failed: {e}") from e
 
 
-class EnhancedOutcomeModels:
-    """Enhanced outcome models combining multiple ML approaches"""
-    
-    def __init__(self):
-        self.models = {}
-        self.preprocessors = {}
-        self.is_fitted = False
-    
-    def build_patient_features(self, patient_data: pd.DataFrame) -> pd.DataFrame:
-        """Build features from patient data for ML models"""
-        features = pd.DataFrame()
-        
-        # Demographics
-        if 'age' in patient_data.columns:
-            features['age'] = patient_data['age']
-            features['age_squared'] = patient_data['age'] ** 2
-            features['is_elderly'] = (patient_data['age'] > 65).astype(int)
-        
-        if 'gender' in patient_data.columns:
-            features['is_male'] = (patient_data['gender'] == 'M').astype(int)
-            features['is_female'] = (patient_data['gender'] == 'F').astype(int)
-        
-        # Clinical indicators
-        if 'baseline_risk_score' in patient_data.columns:
-            features['baseline_risk_score'] = patient_data['baseline_risk_score']
-        
-        # Time-based features
-        if 'follow_up_time' in patient_data.columns:
-            features['follow_up_time'] = patient_data['follow_up_time']
-            features['follow_up_log'] = np.log(patient_data['follow_up_time'] + 1)
-        
-        # Comorbidity counts
-        comorbidity_cols = [col for col in patient_data.columns if 'comorbidity' in col.lower() or 'condition' in col.lower()]
-        if comorbidity_cols:
-            features['comorbidity_count'] = patient_data[comorbidity_cols].sum(axis=1)
-        
-        # Fill NaN values
-        features = features.fillna(features.median())
-        
-        return features
-    
-    def train_risk_prediction_model(self, X: pd.DataFrame, y: np.ndarray, model_type: str = 'rf') -> Any:
-        """Train a risk prediction model"""
-        if model_type == 'rf':
-            model = RandomForestClassifier(n_estimators=100, random_state=42)
-        elif model_type == 'rfr':  # Random forest regressor for continuous outcomes
-            model = RandomForestRegressor(n_estimators=100, random_state=42)
-        else:
-            raise ValueError(f"Unsupported model type: {model_type}")
-        
-        model.fit(X, y)
-        return model
-    
-    def predict_risk(self, model: Any, X: pd.DataFrame) -> np.ndarray:
-        """Make risk predictions using trained model"""
-        return model.predict_proba(X)[:, 1] if hasattr(model, "predict_proba") else model.predict(X)
-    
-    def train_multi_task_model(self, patient_data: pd.DataFrame, outcomes: Dict[str, np.ndarray]) -> Dict[str, Any]:
-        """Train multi-task model for predicting multiple outcomes"""
-        models = {}
-        
-        # Build features
-        X = self.build_patient_features(patient_data)
-        
-        # Train a separate model for each outcome
-        for outcome_name, outcome_data in outcomes.items():
-            if len(np.unique(outcome_data)) > 1:  # Only train if outcome has variation
-                if len(np.unique(outcome_data)) == 2:  # Binary outcome
-                    model = self.train_risk_prediction_model(X, outcome_data, 'rf')
-                else:  # Continuous or multi-class outcome
-                    model = self.train_risk_prediction_model(X, outcome_data, 'rfr')
-                
-                models[outcome_name] = model
-                logger.info(f"Trained model for outcome: {outcome_name}")
-        
-        self.models = models
-        self.is_fitted = True
-        return models
-
-
 class TorchRiskModel(nn.Module):
-    """PyTorch neural network for risk prediction"""
-    
-    def __init__(self, input_dim: int, hidden_dims: List[int] = None):
+    """Feed-forward network producing a single scalar per patient.
+
+    `final_activation` decides what that scalar means:
+      "sigmoid" -- a probability in [0, 1], for binary event prediction.
+      "none"    -- an unbounded log-risk score, for proportional-hazards
+                   models where the output is a log hazard ratio.
+
+    Choosing wrongly is not cosmetic: squashing a log-risk score through a
+    sigmoid caps the hazard ratio and destroys the scale the Cox partial
+    likelihood is defined on.
+    """
+
+    SUPPORTED_ACTIVATIONS = ("sigmoid", "none")
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: List[int] = None,
+        final_activation: str = "sigmoid",
+    ):
         super(TorchRiskModel, self).__init__()
-        
+
+        if final_activation not in self.SUPPORTED_ACTIVATIONS:
+            raise ValueError(
+                f"final_activation must be one of {self.SUPPORTED_ACTIVATIONS}, "
+                f"got {final_activation!r}")
+
         if hidden_dims is None:
             hidden_dims = [64, 32, 16]
-        
+
         layers = []
         prev_dim = input_dim
-        
+
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(prev_dim, hidden_dim))
             layers.append(nn.ReLU())
             layers.append(nn.Dropout(0.2))
             prev_dim = hidden_dim
-        
-        # Final layer for binary classification
+
         layers.append(nn.Linear(prev_dim, 1))
-        layers.append(nn.Sigmoid())
-        
+        if final_activation == "sigmoid":
+            layers.append(nn.Sigmoid())
+
+        self.final_activation = final_activation
         self.network = nn.Sequential(*layers)
-    
+
     def forward(self, x):
         return self.network(x)
 
@@ -426,12 +381,24 @@ class EnhancedOutcomeModels:
         if 'baseline_risk_score' in patient_data.columns:
             features['baseline_risk_score'] = patient_data['baseline_risk_score']
         
+        # Severity was previously accepted by the API schema and then dropped
+        # here, so a caller supplying it had no way to tell it was ignored.
+        if 'severity_score' in patient_data.columns:
+            features['severity_score'] = patient_data['severity_score']
+        
         # Time-based features
         if 'days_since_admission' in patient_data.columns:
             features['days_since_admission'] = patient_data['days_since_admission']
         
         # Comorbidity counts
-        comorbidity_cols = [col for col in patient_data.columns if 'comorbidity' in col.lower() or 'condition' in col.lower() or 'score' in col.lower()]
+        # Match on comorbidity/condition only. Including 'score' here used to
+        # sweep in baseline_risk_score, so `comorbidity_count` was the count
+        # plus the risk score -- and the risk score was separately kept as its
+        # own feature, double-counting it.
+        comorbidity_cols = [
+            col for col in patient_data.columns
+            if 'comorbidity' in col.lower() or 'condition' in col.lower()
+        ]
         if comorbidity_cols:
             features['comorbidity_count'] = patient_data[comorbidity_cols].sum(axis=1)
         
@@ -509,73 +476,125 @@ class EnhancedOutcomeModels:
 
 
 class DeepSurvivalModel:
-    """Deep learning model for survival prediction"""
-    
-    def __init__(self, input_dim: int):
+    """Neural proportional-hazards model (DeepSurv).
+
+    The network outputs a log-risk score and is trained against the Cox
+    negative partial log-likelihood, so both the event times and the
+    censoring indicator take part in the fit.
+
+    This replaces an earlier implementation that discarded `survival_times`
+    and minimised binary cross-entropy on the event indicator alone. That
+    is an event classifier, not a survival model: it has no notion of when
+    an event happened, and it treats a patient censored at three months as
+    a confirmed non-event rather than as someone who was simply not
+    observed long enough.
+
+    Ties in event time use the Breslow approximation.
+    """
+
+    def __init__(self, input_dim: int, hidden_dims: List[int] = None, lr: float = 0.001):
         self.input_dim = input_dim
-        self.model = TorchRiskModel(input_dim)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
-        self.criterion = nn.BCELoss()
+        # No output squashing: a proportional-hazards risk score is a
+        # log-hazard-ratio on (-inf, inf), not a probability.
+        self.model = TorchRiskModel(input_dim, hidden_dims, final_activation="none")
+        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
         self.is_fitted = False
-    
-    def prepare_data(self, features: pd.DataFrame, survival_times: np.ndarray, 
-                    events: np.ndarray, time_bins: int = 10) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Prepare data for deep survival model - simplified for binary classification"""
-        # Convert features to tensor
-        X_tensor = torch.FloatTensor(features.values)
-        
-        # Simplify to binary classification: whether an event occurred
-        y_tensor = torch.FloatTensor(events).unsqueeze(1)  # Shape: (n_samples, 1)
-        
-        return X_tensor, y_tensor
-    
-    def predict_risk(self, features: pd.DataFrame) -> np.ndarray:
-        """Predict risk scores"""
-        if not self.is_fitted:
-            raise ValueError("Model must be trained before prediction")
-        
-        X_tensor = torch.FloatTensor(features.values)
-        self.model.eval()
-        
-        with torch.no_grad():
-            risk_scores = self.model(X_tensor).numpy()
-        
-        # Return risk scores (flatten if needed)
-        return risk_scores.flatten()
-    
-    def train(self, features: pd.DataFrame, survival_times: np.ndarray, 
-              events: np.ndarray, epochs: int = 100):
-        """Train the deep survival model"""
-        X_tensor, y_tensor = self.prepare_data(features, survival_times, events)
-        
+
+    @staticmethod
+    def cox_partial_log_likelihood(
+        log_risk: torch.Tensor, durations: torch.Tensor, events: torch.Tensor
+    ) -> torch.Tensor:
+        """Negative Cox partial log-likelihood (Breslow), averaged over events.
+
+        For each patient i who had the event, the contribution is
+        `risk_i - logsumexp(risk_j for all j still at risk at time T_i)`.
+        Sorting by descending duration makes the risk set a prefix, so the
+        inner term is a cumulative logsumexp.
+        """
+        order = torch.argsort(durations, descending=True)
+        log_risk = log_risk[order]
+        events = events[order]
+
+        log_risk_set_sum = torch.logcumsumexp(log_risk, dim=0)
+        observed = events > 0
+        if not bool(observed.any()):
+            raise ValueError(
+                "Cox partial likelihood is undefined when no event is observed; "
+                "every patient in this batch is censored")
+
+        return -(log_risk - log_risk_set_sum)[observed].mean()
+
+    def prepare_data(
+        self, features: pd.DataFrame, survival_times: np.ndarray, events: np.ndarray
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Convert a cohort to tensors. All three inputs are used."""
+        if len(features) != len(survival_times) or len(features) != len(events):
+            raise ValueError(
+                f"Length mismatch: {len(features)} feature rows, "
+                f"{len(survival_times)} survival times, {len(events)} events")
+
+        return (
+            torch.FloatTensor(features.to_numpy(dtype=np.float32)),
+            torch.FloatTensor(np.asarray(survival_times, dtype=np.float32)),
+            torch.FloatTensor(np.asarray(events, dtype=np.float32)),
+        )
+
+    def train(
+        self,
+        features: pd.DataFrame,
+        survival_times: np.ndarray,
+        events: np.ndarray,
+        epochs: int = 100,
+    ) -> List[float]:
+        """Fit the model, returning the loss at each epoch."""
+        X, durations, event_flags = self.prepare_data(features, survival_times, events)
+
         self.model.train()
+        losses = []
         for epoch in range(epochs):
             self.optimizer.zero_grad()
-            
-            outputs = self.model(X_tensor)
-            loss = self.criterion(outputs, y_tensor)
-            
+            log_risk = self.model(X).squeeze(-1)
+            loss = self.cox_partial_log_likelihood(log_risk, durations, event_flags)
             loss.backward()
             self.optimizer.step()
-            
+
+            losses.append(float(loss.item()))
             if epoch % 20 == 0:
-                logger.info(f"Epoch {epoch}, Loss: {loss.item():.4f}")
-        
+                logger.info(f"Epoch {epoch}, partial log-likelihood loss: {loss.item():.4f}")
+
         self.is_fitted = True
-    
+        return losses
+
     def predict_risk(self, features: pd.DataFrame) -> np.ndarray:
-        """Predict risk scores"""
+        """Log-risk scores: higher means a higher hazard.
+
+        These are relative, on the log-hazard-ratio scale. They are not
+        probabilities and must not be presented to a clinician as one.
+        """
         if not self.is_fitted:
             raise ValueError("Model must be trained before prediction")
-        
-        X_tensor = torch.FloatTensor(features.values)
+
+        X = torch.FloatTensor(features.to_numpy(dtype=np.float32))
         self.model.eval()
-        
         with torch.no_grad():
-            risk_scores = self.model(X_tensor).numpy()
-        
-        # Return average risk across all time bins
-        return np.mean(risk_scores, axis=1)
+            return self.model(X).squeeze(-1).numpy()
+
+    def predict_partial_hazard(self, features: pd.DataFrame) -> np.ndarray:
+        """exp(log-risk): the hazard ratio relative to the baseline."""
+        return np.exp(self.predict_risk(features))
+
+    def concordance(
+        self, features: pd.DataFrame, survival_times: np.ndarray, events: np.ndarray
+    ) -> float:
+        """Concordance index of the fitted risk scores.
+
+        Higher risk should mean shorter survival, hence the negation. 0.5 is
+        chance. Computing this on the rows the model was fitted on gives an
+        in-sample figure; pass held-out data for an honest estimate.
+        """
+        return float(
+            concordance_index(survival_times, -self.predict_risk(features), events)
+        )
 
 
 async def main():
@@ -601,7 +620,12 @@ async def main():
     treatment = np.random.choice([0, 1], n_patients, p=[0.6, 0.4])  # 40% receive treatment
     
     # Generate survival times (exponential-like with treatment effect)
-    base_hazard = 0.001
+    # Calibrated against the follow-up window below. At the previous
+    # value the per-patient event probability over 0.5-5 years was well
+    # under 1%, so almost every patient was censored: the Cox fit rested
+    # on a handful of events and the ATE was estimated from an outcome
+    # that was zero for nearly everyone.
+    base_hazard = 0.30
     age_effect = (age - 50) / 100
     treatment_effect = -0.5 if treatment.sum() > 0 else 0  # Treatment reduces risk
     

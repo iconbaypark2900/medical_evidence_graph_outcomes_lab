@@ -14,7 +14,7 @@ import numpy as np
 from typing import Dict, List, Tuple
 import logging
 from datetime import datetime
-from enhanced_ml_models import (
+from src.enhanced_ml_models import (
     SurvivalAnalysisModels, 
     CausalInferenceModels, 
     EnhancedOutcomeModels, 
@@ -46,7 +46,12 @@ async def demonstrate_survival_analysis():
     comorbidity_score = np.clip(comorbidity_score, 0, 5)
     
     # Generate survival times with treatment effect
-    base_hazard = 0.002
+    # Calibrated against the follow-up window below. At the previous
+    # value the per-patient event probability over 0.5-5 years was well
+    # under 1%, so almost every patient was censored: the Cox fit rested
+    # on a handful of events and the ATE was estimated from an outcome
+    # that was zero for nearly everyone.
+    base_hazard = 0.30
     age_effect = (age - 50) / 100
     treatment_effect = -0.6 * treatment  # Treatment improves survival
     comorbidity_effect = comorbidity_score * 0.2
@@ -207,10 +212,17 @@ async def demonstrate_deep_learning():
     # Make predictions
     features = patient_data.select_dtypes(include=[np.number])  # Select only numeric columns for prediction
     risk_scores = deep_model.predict_risk(features)
-    avg_risk = np.mean(risk_scores)
-    
+
     logger.info(f"✅ Deep survival model trained successfully")
-    logger.info(f"✅ Average predicted risk: {avg_risk:.3f}")
+    # These are log-hazard-ratio scores, not probabilities: they are centred
+    # near zero and negative values are ordinary. Only their ORDER is
+    # meaningful, which is what the concordance index measures.
+    logger.info(
+        f"✅ Log-risk scores: mean {np.mean(risk_scores):.3f}, "
+        f"range [{risk_scores.min():.3f}, {risk_scores.max():.3f}]")
+    logger.info(
+        f"✅ In-sample concordance: "
+        f"{deep_model.concordance(features, survival_times, events):.3f}")
     
     return deep_model
 
