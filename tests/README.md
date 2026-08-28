@@ -1,7 +1,7 @@
 # Test suite
 
 ```bash
-.venv/bin/python -m pytest              # everything, ~17s from cold
+.venv/bin/python -m pytest              # everything, ~11s from cold
 .venv/bin/python -m pytest --cov=src    # with coverage
 .venv/bin/python -m pytest -m known_defect   # proven-but-unfixed bugs (currently none)
 ```
@@ -30,6 +30,9 @@ suite has caught so far returned a perfectly plausible number.
 | `test_data_ingestion.py` | PubMed/ClinicalTrials URL building, XML parsing, HTTP status handling |
 | `test_cohort_io.py` | Cohort CSV → API payload conversion and its error messages |
 | `test_api_backend.py` | Every endpoint: real analysis, validation, and the determinism guards |
+| `test_outcomes_analytics.py` | Cohort criteria, Kaplan-Meier, log-rank comparison, NNT |
+| `test_evidence_graph.py` | Stable entity ids, structural link suggestion, refusal to fake embeddings |
+| `test_evidence_ingestion.py` | The ingestion pipeline over an injected retrieval function |
 
 ## The determinism guards
 

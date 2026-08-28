@@ -11,7 +11,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.enhanced_ml_models import SurvivalAnalysisModels, SurvivalAnalysisResult
+from src.enhanced_ml_models import (
+    SurvivalAnalysisModels,
+    SurvivalAnalysisResult,
+    SurvivalComparison,
+)
 from tests.conftest import TRUE_BETA_AGE_Z, TRUE_BETA_TREATMENT
 
 
@@ -192,3 +196,120 @@ def test_cox_returns_a_baseline_survival_curve(models, survival_cohort):
         later <= earlier + 1e-9
         for earlier, later in zip(result.baseline_survival, result.baseline_survival[1:])
     )
+
+
+# --------------------------------------------------------------------------
+# Confidence intervals and group comparison
+# --------------------------------------------------------------------------
+
+def test_kaplan_meier_confidence_intervals_bracket_the_estimate(models, survival_cohort):
+    times, survival, lower, upper = models.kaplan_meier_with_confidence_intervals(
+        survival_cohort["observed_time"].to_numpy(),
+        survival_cohort["event"].to_numpy(),
+    )
+
+    assert len(times) == len(survival) == len(lower) == len(upper)
+    for s, lo, hi in zip(survival[1:], lower[1:], upper[1:]):
+        assert lo <= s <= hi
+        assert 0.0 <= lo and hi <= 1.0
+
+
+def test_greenwood_intervals_widen_as_the_risk_set_shrinks(models, survival_cohort):
+    """The binomial SE this replaced ignored censoring and understated the
+    uncertainty in the tail, which is where the curve is least certain."""
+    _, survival, lower, upper = models.kaplan_meier_with_confidence_intervals(
+        survival_cohort["observed_time"].to_numpy(),
+        survival_cohort["event"].to_numpy(),
+    )
+
+    widths = [hi - lo for lo, hi in zip(lower, upper)]
+    early = np.mean(widths[1:len(widths) // 4])
+    late = np.mean(widths[-len(widths) // 4:])
+    assert late > early
+
+
+def test_logrank_detects_a_real_survival_difference():
+    gen = np.random.default_rng(99)
+    n = 400
+    duration = np.concatenate([gen.exponential(8, n), gen.exponential(24, n)])
+    event = np.ones(2 * n, dtype=int)
+    groups = np.array(["control"] * n + ["treatment"] * n)
+
+    result = SurvivalAnalysisModels.compare_survival_curves(duration, event, groups)
+
+    assert isinstance(result, SurvivalComparison)
+    assert result.test == "logrank"
+    assert result.degrees_of_freedom == 1
+    assert result.p_value < 1e-10
+    assert result.group_sizes == {"control": n, "treatment": n}
+
+
+def test_logrank_does_not_flag_two_samples_from_the_same_distribution():
+    """The guard that matters: the p-value must be able to come back large.
+
+    A p-value drawn from np.random.uniform(0.001, 0.05) -- which is what
+    the outcomes service used to report -- can never fail this test.
+    """
+    gen = np.random.default_rng(7)
+    n = 500
+    duration = gen.exponential(12, 2 * n)
+    event = gen.binomial(1, 0.7, 2 * n)
+    groups = np.array(["a"] * n + ["b"] * n)
+
+    result = SurvivalAnalysisModels.compare_survival_curves(duration, event, groups)
+
+    assert result.p_value > 0.05
+
+
+def test_logrank_handles_more_than_two_groups():
+    gen = np.random.default_rng(5)
+    n = 250
+    duration = np.concatenate([
+        gen.exponential(8, n), gen.exponential(16, n), gen.exponential(32, n)])
+    event = np.ones(3 * n, dtype=int)
+    groups = np.array(["a"] * n + ["b"] * n + ["c"] * n)
+
+    result = SurvivalAnalysisModels.compare_survival_curves(duration, event, groups)
+
+    assert result.test == "multivariate_logrank"
+    assert result.degrees_of_freedom == 2
+    assert result.p_value < 1e-10
+
+
+def test_logrank_reports_event_counts_alongside_the_p_value(survival_cohort):
+    """A p-value with no denominators cannot be judged."""
+    groups = np.where(survival_cohort["treatment"] == 1, "treated", "control")
+
+    result = SurvivalAnalysisModels.compare_survival_curves(
+        survival_cohort["observed_time"].to_numpy(),
+        survival_cohort["event"].to_numpy(),
+        groups,
+    )
+
+    assert sum(result.group_sizes.values()) == len(survival_cohort)
+    assert sum(result.group_events.values()) == int(survival_cohort["event"].sum())
+    for group, events in result.group_events.items():
+        assert events <= result.group_sizes[group]
+
+
+def test_logrank_requires_at_least_two_groups():
+    with pytest.raises(ValueError, match="at least two groups"):
+        SurvivalAnalysisModels.compare_survival_curves(
+            np.array([1.0, 2.0, 3.0]), np.array([1, 1, 1]), np.array(["a", "a", "a"])
+        )
+
+
+def test_logrank_requires_at_least_one_event():
+    with pytest.raises(ValueError, match="No events observed"):
+        SurvivalAnalysisModels.compare_survival_curves(
+            np.array([1.0, 2.0, 3.0, 4.0]),
+            np.zeros(4, dtype=int),
+            np.array(["a", "a", "b", "b"]),
+        )
+
+
+def test_logrank_rejects_mismatched_input_lengths():
+    with pytest.raises(ValueError, match="Length mismatch"):
+        SurvivalAnalysisModels.compare_survival_curves(
+            np.array([1.0, 2.0, 3.0]), np.array([1, 1]), np.array(["a", "b", "a"])
+        )

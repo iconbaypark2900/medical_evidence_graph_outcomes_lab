@@ -1,12 +1,32 @@
 """
-Main entry point for the Evidence Ingestion Service
+Main entry point for the Evidence Ingestion Service.
+
+This is an orchestration layer over `src/data_ingestion.py`, which does
+the actual retrieval from PubMed and ClinicalTrials.gov. It previously
+did neither: `fetch_sources` returned the literal string
+"Sample data from PubMed", `parse_normalize` attached empty entity lists
+to it, and clinical trials were normalised with a hardcoded trial id of
+"NCT00000000". The pipeline reported success and emitted an
+`evidence.ingested` event describing nothing.
+
+Output is shaped for `evidence_graph_service.extract_entities_relations`,
+so ingestion feeds the graph directly.
 """
 import asyncio
-from typing import List, Dict, Any
-import aiohttp
-import xml.etree.ElementTree as ET
+import logging
 from dataclasses import dataclass
-import requests
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable, Dict, List, Optional
+
+from src.data_ingestion import (
+    MedicalEvidence,
+    extract_entities_from_text,
+    ingest_medical_evidence,
+)
+
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -18,188 +38,188 @@ class EvidenceSource:
     last_updated: str
 
 
+IngestFn = Callable[[List[str], int], Awaitable[List[MedicalEvidence]]]
+
+
 class EvidenceIngestionService:
-    def __init__(self):
-        """
-        Initialize the evidence ingestion service
-        """
-        self.sources = []
-        self.session = None
-    
+    def __init__(self, ingest_fn: Optional[IngestFn] = None):
+        # Injectable so the pipeline can be exercised without network access.
+        self._ingest = ingest_fn or ingest_medical_evidence
+
     async def __aenter__(self):
-        self.session = aiohttp.ClientSession()
         return self
-    
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
-            await self.session.close()
-    
+        return False
+
     def define_sources(self) -> List[EvidenceSource]:
-        """
-        Define the evidence sources to be ingested
-        """
+        """The sources `data_ingestion` actually retrieves from."""
         return [
             EvidenceSource(
                 name="PubMed",
                 url="https://eutils.ncbi.nlm.nih.gov/entrez/eutils/",
                 source_type="pubmed",
-                last_updated="2023-01-01"
+                last_updated=datetime.now(timezone.utc).isoformat(),
             ),
             EvidenceSource(
                 name="ClinicalTrials.gov",
-                url="https://clinicaltrials.gov/api/",
+                url="https://clinicaltrials.gov/api/v2/",
                 source_type="clinical_trial",
-                last_updated="2023-01-01"
-            )
+                last_updated=datetime.now(timezone.utc).isoformat(),
+            ),
         ]
-    
-    async def fetch_sources(self, sources: List[EvidenceSource]) -> List[Dict[str, Any]]:
+
+    async def fetch_sources(
+        self, search_terms: List[str], max_per_source: int = 5
+    ) -> List[MedicalEvidence]:
+        """Retrieve real records for the given search terms.
+
+        Failures propagate. `data_ingestion` raises rather than returning
+        [] on a transport error precisely so a broken ingest cannot be
+        mistaken for a search that matched nothing, and swallowing that
+        here would undo it.
         """
-        Fetch raw data from evidence sources
+        if not search_terms:
+            raise ValueError("No search terms supplied; nothing to ingest")
+
+        logger.info(f"Ingesting for {search_terms} (max {max_per_source} per source)")
+        evidence = await self._ingest(search_terms, max_per_source)
+        logger.info(f"Retrieved {len(evidence)} records")
+        return evidence
+
+    def parse_normalize(self, evidence: List[MedicalEvidence]) -> List[Dict[str, Any]]:
+        """Normalise records into the shape the graph service consumes.
+
+        Entities come from the record's own text and MeSH headings. Where
+        a field is genuinely absent — a trial with no summary, a paper
+        with no MeSH terms — the corresponding list is empty because
+        nothing was found, not because nothing was looked for.
         """
-        raw_data = []
-        
-        for source in sources:
-            print(f"Fetching data from {source.name}...")
-            
-            # Example implementation for PubMed
-            if source.source_type == "pubmed":
-                # This is a simplified example - in reality, you'd use the PubMed API
-                # to fetch abstracts, metadata, etc.
-                try:
-                    # For demonstration purposes, we'll just simulate fetching
-                    # This would be replaced with actual API calls
-                    data = {
-                        "source": source.name,
-                        "type": source.source_type,
-                        "data": f"Sample data from {source.name}",
-                        "timestamp": "2023-10-01T00:00:00Z"
-                    }
-                    raw_data.append(data)
-                except Exception as e:
-                    print(f"Error fetching from {source.name}: {e}")
-            
-            # Example implementation for ClinicalTrials.gov
-            elif source.source_type == "clinical_trial":
-                try:
-                    # For demonstration purposes, we'll just simulate fetching
-                    data = {
-                        "source": source.name,
-                        "type": source.source_type,
-                        "data": f"Sample clinical trial data from {source.name}",
-                        "timestamp": "2023-10-01T00:00:00Z"
-                    }
-                    raw_data.append(data)
-                except Exception as e:
-                    print(f"Error fetching from {source.name}: {e}")
-        
-        return raw_data
-    
-    def parse_normalize(self, raw_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Parse and normalize raw data from evidence sources
-        """
-        normalized_data = []
-        
-        for item in raw_data:
-            # This would implement complex parsing logic based on source type
-            # For now, implementing a simplified version
-            normalized_item = {
-                "id": f"evidence_{len(normalized_data)}",
-                "source": item["source"],
-                "type": item["type"],
-                "content": item["data"],
-                "timestamp": item["timestamp"],
+        normalized = []
+        for item in evidence:
+            text = " ".join(filter(None, [item.title, item.abstract]))
+            entities = extract_entities_from_text(text) if text else {}
+
+            # MeSH headings are curated by indexers; prefer them over the
+            # keyword matcher where both are available.
+            conditions = list(dict.fromkeys(
+                (item.mesh_terms or []) + entities.get("conditions", [])))
+
+            record = {
+                "id": item.id,
+                "source": item.source,
+                "type": "clinical_trial" if item.nct_id else "publication",
+                "title": item.title,
+                "timestamp": item.pub_date or "",
+                "entities": {
+                    "conditions": conditions,
+                    "interventions": entities.get("interventions", []),
+                    "outcomes": entities.get("outcomes", []),
+                    "populations": entities.get("populations", []),
+                },
                 "metadata": {
-                    "original_format": "raw",
-                    "processing_status": "normalized"
-                }
+                    "journal": item.journal,
+                    "authors": item.authors,
+                    "pmid": item.pmid,
+                    "nct_id": item.nct_id,
+                    "has_abstract": bool(item.abstract),
+                },
             }
-            
-            # Add normalized fields based on source type
-            if item["type"] == "pubmed":
-                normalized_item["entities"] = {
-                    "conditions": [],
-                    "interventions": [],
-                    "outcomes": [],
-                    "populations": []
-                }
-            elif item["type"] == "clinical_trial":
-                normalized_item["entities"] = {
-                    "trial_id": "NCT00000000",  # This would come from the actual data
-                    "conditions": [],
-                    "interventions": [],
-                    "outcomes": [],
-                    "populations": []
-                }
-            
-            normalized_data.append(normalized_item)
-        
-        return normalized_data
-    
+            normalized.append(record)
+
+        return normalized
+
     def map_ontologies(self, normalized_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Attach ontology mappings that are actually available.
+
+        MeSH descriptors come back with every PubMed record, so those are
+        real. SNOMED-CT and ICD require a UMLS licence and a terminology
+        service; there is none configured, so those keys are absent rather
+        than present-and-empty. An empty list reads as "we looked and
+        found no codes", which is a different claim from "we cannot look".
         """
-        Map entities to medical ontologies (e.g., SNOMED-CT, ICD, MeSH)
-        """
-        # In a real implementation, this would use libraries like BioPortal API
-        # or UMLS to map terms to standardized medical ontologies
         for item in normalized_data:
-            # This is a simplified mapping example
-            item["ontology_mappings"] = {
-                "mesh_terms": [],
-                "snomed_ct": [],
-                "icd_codes": []
+            mappings: Dict[str, Any] = {
+                "mesh_terms": item["entities"]["conditions"],
+                "unavailable": ["snomed_ct", "icd"],
+                "unavailable_reason": (
+                    "no UMLS terminology service is configured; these "
+                    "vocabularies cannot be mapped without one"
+                ),
             }
-        
+            item["ontology_mappings"] = mappings
         return normalized_data
-    
-    def store_metadata(self, processed_data: List[Dict[str, Any]]):
+
+    def store_metadata(self, processed_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Summarise what was ingested.
+
+        In-memory only; there is no metadata store wired up yet, and this
+        says so rather than printing "Storing..." as though there were.
         """
-        Store metadata about the processed data
-        """
-        # This would store to a database in a real implementation
-        print(f"Storing metadata for {len(processed_data)} evidence items")
-        
-        # For now, just print summary
+        with_abstract = sum(1 for i in processed_data if i["metadata"]["has_abstract"])
+        by_source: Dict[str, int] = {}
         for item in processed_data:
-            print(f"  - {item['id']}: {item['source']} - {item['type']}")
-    
-    def emit_evidence_ingested(self):
+            by_source[item["source"]] = by_source.get(item["source"], 0) + 1
+
+        summary = {
+            "total": len(processed_data),
+            "by_source": by_source,
+            "with_abstract": with_abstract,
+            "persisted": False,
+            "note": "no metadata store configured; this summary is in-memory only",
+        }
+        logger.info(f"Ingest summary: {summary}")
+        return summary
+
+    def emit_evidence_ingested(self, summary: Dict[str, Any]) -> Dict[str, Any]:
+        """Build the `evidence.ingested` event.
+
+        `delivered: False` because no event bus is configured. The previous
+        version returned `{"status": "completed"}` for an event that was
+        never sent, describing data that was never fetched.
         """
-        Emit evidence.ingested event
-        """
-        # This would emit an actual event in a real implementation
-        print("Emitting evidence.ingested event")
-        return {"event": "evidence.ingested", "status": "completed"}
+        event = {
+            "event": "evidence.ingested",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "payload": summary,
+            "delivered": False,
+            "note": "no event bus configured; event constructed but not published",
+        }
+        logger.info(f"Constructed event: {event['event']} ({summary['total']} records)")
+        return event
+
+    async def run(
+        self, search_terms: List[str], max_per_source: int = 5
+    ) -> Dict[str, Any]:
+        """The full pipeline: fetch, normalise, map, summarise, emit."""
+        evidence = await self.fetch_sources(search_terms, max_per_source)
+        normalized = self.parse_normalize(evidence)
+        mapped = self.map_ontologies(normalized)
+        summary = self.store_metadata(mapped)
+        event = self.emit_evidence_ingested(summary)
+        return {"records": mapped, "summary": summary, "event": event}
 
 
 async def main():
-    """
-    Main function to run the evidence ingestion pipeline
-    """
+    """Run the ingestion pipeline against the live APIs."""
     print("Starting Evidence Ingestion Service...")
-    
+
     async with EvidenceIngestionService() as service:
-        # Define sources
-        sources = service.define_sources()
-        
-        # Fetch raw data
-        raw_data = await service.fetch_sources(sources)
-        
-        # Parse and normalize data
-        normalized_data = service.parse_normalize(raw_data)
-        
-        # Map to ontologies
-        mapped_data = service.map_ontologies(normalized_data)
-        
-        # Store metadata
-        service.store_metadata(mapped_data)
-        
-        # Emit ingestion event
-        event_result = service.emit_evidence_ingested()
-        
-        print("Evidence ingestion completed successfully")
-        print(f"Event result: {event_result}")
+        for source in service.define_sources():
+            print(f"  source: {source.name} ({source.source_type})")
+
+        result = await service.run(["metformin cardiovascular outcomes"], max_per_source=3)
+
+        print(f"\nIngested {result['summary']['total']} records "
+              f"{result['summary']['by_source']}")
+        for record in result["records"]:
+            print(f"\n  [{record['source']}] {record['title'][:80]}")
+            print(f"    conditions:    {record['entities']['conditions'][:4]}")
+            print(f"    interventions: {record['entities']['interventions'][:4]}")
+            print(f"    outcomes:      {record['entities']['outcomes'][:4]}")
+
+        print(f"\nEvent: {result['event']['event']} "
+              f"(delivered={result['event']['delivered']})")
 
 
 if __name__ == "__main__":

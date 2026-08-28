@@ -3,6 +3,7 @@ Data ingestion module to fetch real medical evidence from public APIs
 """
 import asyncio
 import aiohttp
+import urllib.parse
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Any
 import json
@@ -48,15 +49,28 @@ class PubMedFetcher:
             await self.session.close()
     
     def _build_search_url(self, query: str, retmax: int = 10) -> str:
-        """Build PubMed search URL"""
-        return (f"{self.base_url}esearch.fcgi?"
-                f"db=pubmed&term={query}&retmax={retmax}&retmode=json&sort=relevance")
+        """Build PubMed search URL.
+
+        Parameters are percent-encoded. A raw query with spaces or an
+        ampersand in it silently changes the search being run.
+        """
+        params = urllib.parse.urlencode({
+            "db": "pubmed",
+            "term": query,
+            "retmax": retmax,
+            "retmode": "json",
+            "sort": "relevance",
+        })
+        return f"{self.base_url}esearch.fcgi?{params}"
     
     def _build_fetch_url(self, id_list: List[str]) -> str:
         """Build PubMed fetch URL"""
-        ids = ",".join(id_list)
-        return (f"{self.base_url}efetch.fcgi?"
-                f"db=pubmed&id={ids}&retmode=xml")
+        params = urllib.parse.urlencode({
+            "db": "pubmed",
+            "id": ",".join(id_list),
+            "retmode": "xml",
+        })
+        return f"{self.base_url}efetch.fcgi?{params}"
     
     async def search_pubmed(self, query: str, max_results: int = 10) -> List[str]:
         """Search PubMed and return PMIDs.
@@ -212,9 +226,21 @@ class ClinicalTrialsFetcher:
             await self.session.close()
     
     def _build_search_url(self, query: str, max_results: int = 10) -> str:
-        """Build ClinicalTrials.gov search URL"""
-        return (f"{self.base_url}v2/studies?query.term={query}"
-                f"&page.size={max_results}&format=json")
+        """Build ClinicalTrials.gov v2 search URL.
+
+        Two bugs lived here. The page size parameter is `pageSize`, not
+        `page.size`, and the query was interpolated unencoded. The API
+        answered 400 to every request as a result, and `search_trials`
+        turned that into an empty list -- so trial ingestion returned
+        nothing, indistinguishable from a search that matched nothing,
+        for as long as this code has existed.
+        """
+        params = urllib.parse.urlencode({
+            "query.term": query,
+            "pageSize": max_results,
+            "format": "json",
+        })
+        return f"{self.base_url}v2/studies?{params}"
     
     async def search_trials(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
         """Search ClinicalTrials.gov and return study details.

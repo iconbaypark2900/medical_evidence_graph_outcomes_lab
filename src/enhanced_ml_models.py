@@ -19,6 +19,7 @@ from scipy import stats
 from scipy.stats import chi2
 import lifelines
 from lifelines import KaplanMeierFitter, CoxPHFitter
+from lifelines.statistics import multivariate_logrank_test
 from lifelines.utils import concordance_index
 import warnings
 warnings.filterwarnings('ignore')
@@ -39,6 +40,22 @@ class SurvivalAnalysisResult:
     baseline_survival: List[float]
     time_points: List[float]
     survival_probabilities: List[float]
+
+
+@dataclass
+class SurvivalComparison:
+    """Result of a log-rank test between survival curves.
+
+    Carries the group sizes and event counts alongside the p-value, because
+    a p-value with no denominators cannot be judged: the same p can come
+    from a large effect in a small cohort or a trivial one in a huge cohort.
+    """
+    test: str
+    test_statistic: float
+    p_value: float
+    degrees_of_freedom: int
+    group_sizes: Dict[str, int]
+    group_events: Dict[str, int]
 
 
 class SurvivalAnalysisModels:
@@ -69,6 +86,78 @@ class SurvivalAnalysisModels:
             raise RuntimeError(
                 f"Kaplan-Meier fit failed on {len(duration)} observations: {e}"
             ) from e
+
+    def kaplan_meier_with_confidence_intervals(
+        self, duration: np.ndarray, event_observed: np.ndarray
+    ) -> Tuple[List[float], List[float], List[float], List[float]]:
+        """Kaplan-Meier curve with Greenwood confidence intervals.
+
+        Returns (time_points, survival, lower_95, upper_95).
+
+        Greenwood's formula accounts for the shrinking risk set as patients
+        are censored. The binomial standard error sqrt(S(1-S)/n) does not,
+        and understates the uncertainty in the tail of the curve — exactly
+        where a survival estimate is least certain and most quoted.
+        """
+        try:
+            self.kaplan_meier.fit(duration, event_observed)
+        except Exception as e:
+            logger.error(f"Error in Kaplan-Meier analysis: {e}")
+            raise RuntimeError(
+                f"Kaplan-Meier fit failed on {len(duration)} observations: {e}"
+            ) from e
+
+        survival = self.kaplan_meier.survival_function_['KM_estimate']
+        intervals = self.kaplan_meier.confidence_interval_
+        return (
+            survival.index.to_numpy().tolist(),
+            survival.to_numpy().tolist(),
+            intervals['KM_estimate_lower_0.95'].to_numpy().tolist(),
+            intervals['KM_estimate_upper_0.95'].to_numpy().tolist(),
+        )
+
+    @staticmethod
+    def compare_survival_curves(
+        duration: np.ndarray, event_observed: np.ndarray, groups: np.ndarray
+    ) -> SurvivalComparison:
+        """Log-rank test across two or more groups.
+
+        This is where a survival p-value comes from. A single Kaplan-Meier
+        curve has nothing to be tested against, so any p-value attached to
+        one is either measuring something else or was invented.
+        """
+        duration = np.asarray(duration)
+        event_observed = np.asarray(event_observed)
+        groups = np.asarray(groups)
+
+        if not (len(duration) == len(event_observed) == len(groups)):
+            raise ValueError(
+                f"Length mismatch: {len(duration)} durations, "
+                f"{len(event_observed)} event flags, {len(groups)} group labels")
+
+        distinct = np.unique(groups)
+        if len(distinct) < 2:
+            raise ValueError(
+                f"A log-rank test needs at least two groups; every patient is "
+                f"in {distinct[0]!r}")
+
+        if event_observed.sum() == 0:
+            raise ValueError(
+                "No events observed in any group; there is no survival "
+                "difference to test")
+
+        result = multivariate_logrank_test(duration, groups, event_observed)
+
+        return SurvivalComparison(
+            test="multivariate_logrank" if len(distinct) > 2 else "logrank",
+            test_statistic=float(result.test_statistic),
+            p_value=float(result.p_value),
+            degrees_of_freedom=int(result.degrees_of_freedom),
+            group_sizes={str(g): int((groups == g).sum()) for g in distinct},
+            group_events={
+                str(g): int(event_observed[groups == g].sum()) for g in distinct
+            },
+        )
     
     def cox_regression_analysis(self, data: pd.DataFrame, duration_col: str, event_col: str, 
                                covariate_cols: List[str]) -> SurvivalAnalysisResult:

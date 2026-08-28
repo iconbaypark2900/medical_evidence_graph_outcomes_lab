@@ -24,8 +24,17 @@ def test_pubmed_search_url_targets_esearch():
 
     assert url.startswith("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?")
     assert "db=pubmed" in url
-    assert "term=heart failure" in url
+    assert "term=heart+failure" in url
     assert "retmax=25" in url
+
+
+def test_pubmed_search_url_encodes_the_query():
+    """An unencoded & or = silently changes the search being run."""
+    url = PubMedFetcher()._build_search_url("SGLT2 & heart failure", retmax=5)
+
+    assert "term=SGLT2+%26+heart+failure" in url
+    # Exactly one retmax parameter -- the query must not inject its own.
+    assert url.count("retmax=") == 1
 
 
 def test_pubmed_fetch_url_joins_ids_with_commas():
@@ -33,18 +42,26 @@ def test_pubmed_fetch_url_joins_ids_with_commas():
 
     url = fetcher._build_fetch_url(["1", "2", "3"])
 
-    assert "id=1,2,3" in url
+    # Percent-encoded comma; verified against the live efetch endpoint.
+    assert "id=1%2C2%2C3" in url
     assert "retmode=xml" in url
 
 
 def test_clinical_trials_search_url_uses_v2_api():
+    """Regression guard for a URL the API answered 400 to every time.
+
+    The parameter is `pageSize`, not `page.size`, and the query was
+    interpolated unencoded. Because search_trials returned [] on a non-2xx
+    response, trial ingestion silently produced nothing.
+    """
     fetcher = ClinicalTrialsFetcher()
 
     url = fetcher._build_search_url("atrial fibrillation", max_results=5)
 
     assert url.startswith("https://clinicaltrials.gov/api/v2/studies?")
-    assert "query.term=atrial fibrillation" in url
-    assert "page.size=5" in url
+    assert "query.term=atrial+fibrillation" in url
+    assert "pageSize=5" in url
+    assert "page.size" not in url
 
 
 # --------------------------------------------------------------------------

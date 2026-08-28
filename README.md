@@ -64,12 +64,16 @@ The Medical Evidence Graph & Outcomes Insight Lab is a sophisticated platform de
 | Risk models (train / score, held-out metrics) | working, via `/api/models/risk/train` |
 | Evidence retrieval (PubMed, ClinicalTrials.gov) | working, live |
 | Streamlit clinical frontend | working against the API above |
-| Evidence **graph** (Neo4j) and graph-RAG | **not wired up** — `src/graph_rag_service/main.py` retrieval is still `MockOpenSearch` / `MockQdrant` / `MockNeo4j` |
+| Evidence ingestion service | working; delegates to `src/data_ingestion.py`, emits records the graph service consumes |
+| Outcomes analytics service | working; cohort criteria applied for real, log-rank tests for group comparison |
+| Evidence graph service | link suggestion working (Adamic-Adar over the real graph); **KGE embeddings not implemented** — `recompute_kge_features` raises rather than returning random vectors |
+| Evidence **graph** storage (Neo4j) and graph-RAG | **not wired up** — `src/graph_rag_service/main.py` retrieval is still `MockOpenSearch` / `MockQdrant` / `MockNeo4j` |
 | Pathway & guideline service | not exercised |
 | Vault / OPA / Presidio / MLflow / Langfuse | not integrated |
 
 Real Neo4j, OpenSearch and Qdrant clients exist in `src/integration.py` and
-`src/db_connection_test.py`, but nothing in the API path calls them yet.
+`src/db_connection_test.py`, but nothing in the API path calls them yet. The
+graph service holds its nodes in memory.
 
 ## Setup
 
