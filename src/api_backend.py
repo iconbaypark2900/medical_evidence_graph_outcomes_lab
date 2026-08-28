@@ -367,6 +367,17 @@ def median_survival_time(time_points: List[float], survival_probs: List[float]) 
 # Risk model registry
 # ---------------------------------------------------------------------------
 
+# Where trained models and registered guidelines are kept between runs.
+#
+# Both registries were plain in-memory dicts, so a restart silently
+# discarded every trained model and every registered guideline: risk
+# assessment reverted to 503 "no risk model has been trained" and
+# guidelines vanished, with nothing anywhere saying they had ever existed.
+# For a score that is reported alongside held-out performance as evidence
+# you can trust it, losing it on a deploy is not a small thing.
+MODEL_STORE = Path(os.environ.get("MEG_MODEL_STORE", ".model_store"))
+
+
 class RiskModel:
     """A fitted risk model together with what is needed to reproduce and
     judge it: the feature columns it saw, the medians used for imputation,
@@ -406,6 +417,19 @@ class RiskModel:
             "n_test": self.n_test,
         }
 
+    def to_state(self) -> Dict[str, Any]:
+        return {
+            "outcome": self.outcome, "model": self.model, "task": self.task,
+            "feature_columns": self.feature_columns,
+            "feature_medians": self.feature_medians,
+            "metric_name": self.metric_name, "metric_value": self.metric_value,
+            "n_train": self.n_train, "n_test": self.n_test,
+        }
+
+    @classmethod
+    def from_state(cls, state: Dict[str, Any]) -> "RiskModel":
+        return cls(**state)
+
 
 class RiskModelRegistry:
     """Holds fitted risk models for the process.
@@ -421,18 +445,123 @@ class RiskModelRegistry:
         self.version: Optional[str] = None
         self.trained_at: Optional[str] = None
 
+    def __init_store__(self, store: Path = MODEL_STORE):
+        self.store = Path(store)
+
+    @property
+    def _path(self) -> Path:
+        return getattr(self, "store", MODEL_STORE) / "risk_models.joblib"
+
     def is_ready(self) -> bool:
         return bool(self.models)
 
-    def replace(self, models: Dict[str, RiskModel]) -> None:
+    def replace(self, models: Dict[str, RiskModel], persist: bool = True) -> None:
         self.models = models
         self.version = uuid4().hex[:12]
         self.trained_at = datetime.now(timezone.utc).isoformat()
+        if persist:
+            self.save()
+
+    def save(self) -> None:
+        import joblib
+        import sklearn
+
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump({
+            # Recorded so a load can refuse rather than guess. Unpickling
+            # an estimator built by a different scikit-learn is undefined:
+            # it usually works, and when it does not it produces wrong
+            # predictions rather than an error.
+            "sklearn_version": sklearn.__version__,
+            "version": self.version,
+            "trained_at": self.trained_at,
+            "models": {name: m.to_state() for name, m in self.models.items()},
+        }, self._path)
+        logger.info(f"Persisted {len(self.models)} risk models to {self._path}")
+
+    def load(self) -> bool:
+        """Restore models from disk. Returns whether anything was loaded."""
+        if not self._path.exists():
+            return False
+
+        import joblib
+        import sklearn
+
+        try:
+            state = joblib.load(self._path)
+        except Exception as e:
+            logger.error(
+                f"Could not read {self._path}: {e}. Not loading; train again "
+                f"or remove the file deliberately.")
+            return False
+
+        stored = state.get("sklearn_version")
+        if stored != sklearn.__version__:
+            # Refuse rather than warn. A model that silently scores
+            # differently after an upgrade is worse than no model, because
+            # the response still carries the held-out AUC measured before.
+            logger.error(
+                f"{self._path} was written by scikit-learn {stored}, running "
+                f"{sklearn.__version__}. Refusing to load: predictions across "
+                f"versions are not guaranteed to match. Retrain.")
+            return False
+
+        self.models = {name: RiskModel.from_state(m)
+                       for name, m in state["models"].items()}
+        self.version = state["version"]
+        self.trained_at = state["trained_at"]
+        logger.info(
+            f"Restored {len(self.models)} risk models (version {self.version}, "
+            f"trained {self.trained_at})")
+        return True
 
 
 risk_model_registry = RiskModelRegistry()
+risk_model_registry.__init_store__()
+risk_model_registry.load()
+
 outcomes_service = OutcomesAnalyticsService()
 pathway_service = PathwayGuidelineService()
+
+
+class GuidelineStore:
+    """Registered guidelines, kept between runs.
+
+    JSON rather than a pickle: a guideline is plain data, and a format a
+    human can read and correct matters more here than convenience.
+    """
+
+    def __init__(self, store: Path = MODEL_STORE):
+        self.path = Path(store) / "guidelines.json"
+
+    def save(self, guidelines: Dict[str, Any]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(guidelines, indent=2) + "\n")
+
+    def load(self) -> Dict[str, Any]:
+        if not self.path.exists():
+            return {}
+        try:
+            return json.loads(self.path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            logger.error(f"Could not read {self.path}: {e}. Starting empty.")
+            return {}
+
+
+guideline_store = GuidelineStore()
+
+
+def restore_guidelines() -> int:
+    """Re-register persisted guidelines into the pathway service."""
+    restored = guideline_store.load()
+    for payload in restored.values():
+        pathway_service.represent_guideline_as_pathway(payload)
+    if restored:
+        logger.info(f"Restored {len(restored)} guidelines")
+    return len(restored)
+
+
+restore_guidelines()
 survival_models = SurvivalAnalysisModels()
 causal_models = CausalInferenceModels()
 feature_builder = EnhancedOutcomeModels()
@@ -654,6 +783,9 @@ async def health_check():
             "risk_assessment": risk_model_registry.is_ready(),
         },
         "risk_model_version": risk_model_registry.version,
+        "risk_model_trained_at": risk_model_registry.trained_at,
+        "risk_models_persisted": risk_model_registry._path.exists(),
+        "guidelines_registered": len(pathway_service.guidelines),
         # Stated, not assumed. An unauthenticated deployment should be
         # visible to whoever is looking at it.
         "authentication": "api_key" if API_KEYS else "disabled",
@@ -1241,14 +1373,20 @@ async def comparative_effectiveness(request: ComparativeEffectivenessRequest,
 async def register_guideline(request: GuidelineRequest,
                              _key: str = Depends(require_api_key)):
     """Register a guideline as a machine-readable pathway."""
-    pathway = pathway_service.represent_guideline_as_pathway({
+    payload = {
         "id": request.id,
         "name": request.name,
         "condition": request.condition,
         "version": request.version,
         "steps": [step.model_dump() for step in request.steps],
         "decision_points": [d.model_dump() for d in request.decision_points],
-    })
+    }
+    pathway = pathway_service.represent_guideline_as_pathway(payload)
+
+    stored = guideline_store.load()
+    stored[request.id] = payload
+    guideline_store.save(stored)
+
     return {
         "status": "success",
         "guideline_id": pathway.id,

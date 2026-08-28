@@ -166,6 +166,14 @@ Risk assessment additionally requires a model to have been trained, and
 returns each score together with that model's held-out performance and a
 list of any features that had to be imputed.
 
+Trained models and registered guidelines persist to `MEG_MODEL_STORE`
+(default `.model_store/`) and are restored at startup, so a restart does
+not silently discard them. A model written by a different scikit-learn
+version is refused rather than loaded: unpickling an estimator across
+versions usually works, and when it does not it produces wrong
+predictions rather than an error — while the response still carries the
+held-out AUC measured before.
+
 ### Both together
 
 ```bash
