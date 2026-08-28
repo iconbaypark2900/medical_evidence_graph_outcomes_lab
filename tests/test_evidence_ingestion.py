@@ -40,9 +40,13 @@ TRIAL = MedicalEvidence(
 
 
 def service_returning(*records) -> EvidenceIngestionService:
-    async def fake_ingest(search_terms, max_per_source):
+    async def fake_ingest(search_terms, max_per_source, since=None):
+        fake_ingest.calls.append((list(search_terms), max_per_source, since))
         return list(records)
-    return EvidenceIngestionService(ingest_fn=fake_ingest)
+    fake_ingest.calls = []
+    service = EvidenceIngestionService(ingest_fn=fake_ingest)
+    service.ingest_calls = fake_ingest.calls
+    return service
 
 
 # --------------------------------------------------------------------------
@@ -72,7 +76,7 @@ async def test_a_retrieval_failure_is_not_swallowed():
     """data_ingestion raises rather than returning [] so a broken ingest
     cannot be mistaken for a search that matched nothing. Catching it here
     would undo that."""
-    async def failing_ingest(search_terms, max_per_source):
+    async def failing_ingest(search_terms, max_per_source, since=None):
         raise RuntimeError("PubMed search returned HTTP 429")
 
     service = EvidenceIngestionService(ingest_fn=failing_ingest)
@@ -264,3 +268,25 @@ def test_study_design_reaches_the_normalised_record():
 
     assert records[0]["metadata"]["publication_types"] == [
         "Randomized Controlled Trial"]
+
+
+# --------------------------------------------------------------------------
+# Incremental windows
+# --------------------------------------------------------------------------
+
+async def test_a_date_window_reaches_the_fetchers():
+    """Without this, the only refresh available is a full re-fetch of every
+    term ever searched -- which is slow enough that it does not get run."""
+    from datetime import date
+
+    service = service_returning(ARTICLE)
+    await service.fetch_sources(["heart failure"], 5, since=date(2026, 8, 1))
+
+    assert service.ingest_calls == [(["heart failure"], 5, date(2026, 8, 1))]
+
+
+async def test_no_window_means_fetch_everything():
+    service = service_returning(ARTICLE)
+    await service.fetch_sources(["heart failure"], 5)
+
+    assert service.ingest_calls[0][2] is None

@@ -6,10 +6,10 @@ import aiohttp
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
-from typing import List, Dict, Any
+from typing import Any, Dict, List, Optional
 import json
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from dataclasses import dataclass
 
 
@@ -125,20 +125,35 @@ class PubMedFetcher:
         if self.session:
             await self.session.close()
     
-    def _build_search_url(self, query: str, retmax: int = 10) -> str:
+    def _build_search_url(self, query: str, retmax: int = 10,
+                          since: Optional[date] = None) -> str:
         """Build PubMed search URL.
 
         Parameters are percent-encoded. A raw query with spaces or an
         ampersand in it silently changes the search being run.
+
+        `since` restricts to records whose Entrez date falls on or after
+        it, which is what makes an incremental ingest possible: a corpus
+        that can only be rebuilt from scratch is a corpus that stops being
+        refreshed.
         """
-        params = urllib.parse.urlencode({
+        params = {
             "db": "pubmed",
             "term": query,
             "retmax": retmax,
             "retmode": "json",
             "sort": "relevance",
-        })
-        return f"{self.base_url}esearch.fcgi?{params}"
+        }
+        if since is not None:
+            # edat is the date the record entered PubMed, which is what a
+            # "what is new since I last looked" question means. Publication
+            # date would miss records indexed late.
+            params.update({
+                "datetype": "edat",
+                "mindate": since.strftime("%Y/%m/%d"),
+                "maxdate": "3000/01/01",
+            })
+        return f"{self.base_url}esearch.fcgi?{urllib.parse.urlencode(params)}"
     
     def _build_fetch_url(self, id_list: List[str]) -> str:
         """Build PubMed fetch URL"""
@@ -149,7 +164,8 @@ class PubMedFetcher:
         })
         return f"{self.base_url}efetch.fcgi?{params}"
     
-    async def search_pubmed(self, query: str, max_results: int = 10) -> List[str]:
+    async def search_pubmed(self, query: str, max_results: int = 10,
+                            since: Optional[date] = None) -> List[str]:
         """Search PubMed and return PMIDs.
 
         Raises RuntimeError on any transport or API failure. An empty list is
@@ -157,7 +173,7 @@ class PubMedFetcher:
         """
         try:
             data = await self._get(
-                self._build_search_url(query, max_results),
+                self._build_search_url(query, max_results, since),
                 lambda response: response.json())
             id_list = data.get("esearchresult", {}).get("idlist", [])
             logger.info(f"Found {len(id_list)} results for query: {query}")
@@ -383,7 +399,8 @@ class ClinicalTrialsFetcher(PubMedFetcher):
         if self.session:
             await self.session.close()
     
-    def _build_search_url(self, query: str, max_results: int = 10) -> str:
+    def _build_search_url(self, query: str, max_results: int = 10,
+                          since: Optional[date] = None) -> str:
         """Build ClinicalTrials.gov v2 search URL.
 
         Two bugs lived here. The page size parameter is `pageSize`, not
@@ -393,14 +410,20 @@ class ClinicalTrialsFetcher(PubMedFetcher):
         nothing, indistinguishable from a search that matched nothing,
         for as long as this code has existed.
         """
-        params = urllib.parse.urlencode({
+        params = {
             "query.term": query,
             "pageSize": max_results,
             "format": "json",
-        })
-        return f"{self.base_url}v2/studies?{params}"
+        }
+        if since is not None:
+            # Registry records are revised in place, so "last updated" is
+            # the field that answers "what changed since I last looked".
+            params["filter.advanced"] = (
+                f"AREA[LastUpdatePostDate]RANGE[{since.isoformat()},MAX]")
+        return f"{self.base_url}v2/studies?{urllib.parse.urlencode(params)}"
     
-    async def search_trials(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
+    async def search_trials(self, query: str, max_results: int = 10,
+                            since: Optional[date] = None) -> List[Dict[str, Any]]:
         """Search ClinicalTrials.gov and return study details.
 
         As with PubMed, an empty list means the query matched no studies.
@@ -408,7 +431,7 @@ class ClinicalTrialsFetcher(PubMedFetcher):
         """
         try:
             data = await self._get(
-                self._build_search_url(query, max_results),
+                self._build_search_url(query, max_results, since),
                 lambda response: response.json())
             studies = data.get("studies", [])
 
@@ -425,9 +448,18 @@ class ClinicalTrialsFetcher(PubMedFetcher):
             raise RuntimeError(f"ClinicalTrials.gov search failed: {e}") from e
 
 
-async def ingest_medical_evidence(search_terms: List[str], max_per_source: int = 5) -> List[MedicalEvidence]:
-    """Ingest medical evidence from multiple sources"""
-    logger.info(f"Starting ingestion for search terms: {search_terms}")
+async def ingest_medical_evidence(
+    search_terms: List[str], max_per_source: int = 5,
+    since: Optional[date] = None,
+) -> List[MedicalEvidence]:
+    """Ingest medical evidence from multiple sources.
+
+    `since` restricts both sources to records added or revised on or after
+    that date, so a refresh costs a handful of requests rather than a full
+    re-fetch of everything ever matched.
+    """
+    window = f" since {since.isoformat()}" if since else ""
+    logger.info(f"Starting ingestion for search terms: {search_terms}{window}")
     
     all_evidence = []
     
@@ -435,7 +467,7 @@ async def ingest_medical_evidence(search_terms: List[str], max_per_source: int =
     async with PubMedFetcher() as pubmed_fetcher:
         for term in search_terms:
             logger.info(f"Searching PubMed for: {term}")
-            pmids = await pubmed_fetcher.search_pubmed(term, max_per_source)
+            pmids = await pubmed_fetcher.search_pubmed(term, max_per_source, since)
             if pmids:
                 articles = await pubmed_fetcher.fetch_pubmed_articles(pmids[:max_per_source])
                 
@@ -465,7 +497,7 @@ async def ingest_medical_evidence(search_terms: List[str], max_per_source: int =
     async with ClinicalTrialsFetcher() as trials_fetcher:
         for term in search_terms:
             logger.info(f"Searching ClinicalTrials.gov for: {term}")
-            trials = await trials_fetcher.search_trials(term, max_per_source)
+            trials = await trials_fetcher.search_trials(term, max_per_source, since)
             
             for trial in trials:
                 study = trial.get("protocolSection", {})

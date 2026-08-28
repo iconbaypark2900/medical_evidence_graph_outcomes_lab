@@ -25,7 +25,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -70,6 +70,14 @@ POINT_NAMESPACE = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
 # construction. Those stay searchable in OpenSearch, where the text is the
 # point, and are kept out of the graph, where it is noise.
 MAX_ENTITY_NODE_LENGTH = 80
+
+# Where the incremental-ingest watermark lives.
+#
+# Without one, the only refresh available is a full re-fetch of every term
+# ever searched, which is slow enough that it does not get run -- and a
+# corpus that is not refreshed silently stops representing the literature
+# while retrieval keeps answering from it.
+INGEST_STATE_PATH = Path(".ingest_state.json")
 
 
 class StorageError(RuntimeError):
@@ -121,6 +129,42 @@ def evidence_to_document(evidence: MedicalEvidence) -> Dict[str, Any]:
         "populations": entities.get("populations", []),
         "indexed_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+class IngestState:
+    """Records when each search term was last ingested.
+
+    Deliberately a plain JSON file rather than a row in one of the three
+    stores: the watermark has to survive the stores being dropped and
+    rebuilt, which is exactly when it matters most.
+    """
+
+    def __init__(self, path: Path = INGEST_STATE_PATH):
+        self.path = Path(path)
+
+    def _read(self) -> Dict[str, str]:
+        if not self.path.exists():
+            return {}
+        try:
+            return json.loads(self.path.read_text()).get("last_ingested", {})
+        except (json.JSONDecodeError, OSError) as e:
+            # A corrupt watermark must not silently become "ingest
+            # everything from the beginning of time".
+            raise StorageError(
+                f"Cannot read ingest state at {self.path}: {e}. Delete it to "
+                f"start from scratch, deliberately.") from e
+
+    def last_ingested(self, term: str) -> Optional[date]:
+        raw = self._read().get(term)
+        return date.fromisoformat(raw) if raw else None
+
+    def record(self, terms: List[str], when: Optional[date] = None) -> None:
+        when = when or datetime.now(timezone.utc).date()
+        state = self._read()
+        for term in terms:
+            state[term] = when.isoformat()
+        self.path.write_text(json.dumps(
+            {"last_ingested": state}, indent=2, sort_keys=True) + "\n")
 
 
 class EvidenceStore:
@@ -428,34 +472,87 @@ EvidenceStorage = EvidenceStore
 
 
 async def integrate_ingestion_and_storage(
-    search_terms: Optional[List[str]] = None, max_per_source: int = 3
+    search_terms: Optional[List[str]] = None,
+    max_per_source: int = 3,
+    since: Optional[date] = None,
+    incremental: bool = False,
+    state_path: Path = INGEST_STATE_PATH,
 ) -> Dict[str, int]:
-    """Ingest from the live APIs and index the result."""
+    """Ingest from the live APIs and index the result.
+
+    With `incremental`, each term is fetched only from the day it was last
+    ingested, and the watermark is advanced afterwards. A term never
+    ingested before is fetched in full.
+    """
     from src.evidence_ingestion_service.main import EvidenceIngestionService
 
     search_terms = search_terms or ["metformin cardiovascular outcomes"]
+    state = IngestState(state_path)
 
     store = EvidenceStore()
     await store.connect()
     try:
         await store.ensure_schema()
 
+        evidence = []
         async with EvidenceIngestionService() as ingestion:
-            evidence = await ingestion.fetch_sources(search_terms, max_per_source)
-            evidence = ingestion.enrich_entities(evidence)
+            for term in search_terms:
+                window = since
+                if incremental and window is None:
+                    window = state.last_ingested(term)
+                    if window:
+                        logger.info(f"{term!r}: fetching changes since {window}")
+                    else:
+                        logger.info(f"{term!r}: never ingested; fetching in full")
+
+                fetched = await ingestion.fetch_sources([term], max_per_source, window)
+                evidence.extend(ingestion.enrich_entities(fetched))
 
         if not evidence:
-            # A genuinely empty result, because fetch raises on failure.
-            logger.warning(f"No evidence matched {search_terms}")
+            # Genuinely empty: fetch raises on failure, so this means the
+            # window contained nothing new.
+            logger.info(f"Nothing new for {search_terms}")
+            state.record(search_terms)
             return {"neo4j": 0, "opensearch": 0, "qdrant": 0}
 
-        return await store.store_all_evidence(evidence)
+        # Re-indexing an unchanged record updates it in place, so overlap
+        # between windows is harmless.
+        results = await store.store_all_evidence(evidence)
+        state.record(search_terms)
+        return results
     finally:
         await store.close()
 
 
-async def main():
-    results = await integrate_ingestion_and_storage()
+async def main(argv: Optional[List[str]] = None):
+    """CLI entry point. Designed to be driven by cron or a systemd timer.
+
+    `config/settings.json` has always declared a `schedule` for the
+    ingestion service and nothing ever read it. Rather than build an
+    in-process scheduler, this is a command the system scheduler can call;
+    the config value is the crontab line to use.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Ingest medical evidence and index it into all three stores")
+    parser.add_argument("--term", action="append", dest="terms",
+                        help="search term (repeatable)")
+    parser.add_argument("--max-per-source", type=int, default=3)
+    parser.add_argument("--incremental", action="store_true",
+                        help="fetch only what changed since the last run")
+    parser.add_argument("--since", type=date.fromisoformat, default=None,
+                        help="fetch from this date (YYYY-MM-DD); overrides --incremental")
+    parser.add_argument("--state", type=Path, default=INGEST_STATE_PATH)
+    args = parser.parse_args(argv)
+
+    results = await integrate_ingestion_and_storage(
+        search_terms=args.terms,
+        max_per_source=args.max_per_source,
+        since=args.since,
+        incremental=args.incremental,
+        state_path=args.state,
+    )
     logger.info(f"Indexed: {results}")
     return results
 

@@ -277,3 +277,66 @@ def test_a_sentence_long_entity_is_kept_out_of_the_graph():
     assert len(sentence) > MAX_ENTITY_NODE_LENGTH
     assert len("mortality") <= MAX_ENTITY_NODE_LENGTH
     assert len("Sodium-Glucose Transporter 2 Inhibitors") <= MAX_ENTITY_NODE_LENGTH
+
+
+# --------------------------------------------------------------------------
+# Incremental ingest watermark
+# --------------------------------------------------------------------------
+
+def test_a_term_never_ingested_has_no_watermark(tmp_path):
+    from src.integration import IngestState
+
+    state = IngestState(tmp_path / "state.json")
+
+    assert state.last_ingested("metformin") is None
+
+
+def test_recording_a_run_advances_the_watermark(tmp_path):
+    from datetime import date
+
+    from src.integration import IngestState
+
+    state = IngestState(tmp_path / "state.json")
+    state.record(["metformin", "statins"], when=date(2026, 8, 28))
+
+    assert state.last_ingested("metformin") == date(2026, 8, 28)
+    assert state.last_ingested("statins") == date(2026, 8, 28)
+    assert state.last_ingested("aspirin") is None
+
+
+def test_the_watermark_survives_a_new_process(tmp_path):
+    """It has to outlive the stores being dropped and rebuilt, which is
+    exactly when it matters most."""
+    from datetime import date
+
+    from src.integration import IngestState
+
+    path = tmp_path / "state.json"
+    IngestState(path).record(["metformin"], when=date(2026, 8, 1))
+
+    assert IngestState(path).last_ingested("metformin") == date(2026, 8, 1)
+
+
+def test_recording_a_second_run_does_not_lose_the_first_term(tmp_path):
+    from datetime import date
+
+    from src.integration import IngestState
+
+    state = IngestState(tmp_path / "state.json")
+    state.record(["metformin"], when=date(2026, 8, 1))
+    state.record(["statins"], when=date(2026, 8, 28))
+
+    assert state.last_ingested("metformin") == date(2026, 8, 1)
+    assert state.last_ingested("statins") == date(2026, 8, 28)
+
+
+def test_a_corrupt_watermark_is_an_error_not_a_full_refetch(tmp_path):
+    """Silently treating it as "never ingested" would turn a corrupt file
+    into an unannounced full re-fetch of everything."""
+    from src.integration import IngestState
+
+    path = tmp_path / "state.json"
+    path.write_text("{not json")
+
+    with pytest.raises(StorageError, match="Cannot read ingest state"):
+        IngestState(path).last_ingested("metformin")

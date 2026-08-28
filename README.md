@@ -154,8 +154,29 @@ column when a file cannot be used.
 Ingest from the live APIs and index into all three stores:
 
 ```bash
-.venv/bin/python -m src.integration
+# First run for a term: fetches everything matching.
+.venv/bin/python -m src.integration --term "metformin cardiovascular outcomes"
+
+# Later runs: only what PubMed added or the registry revised since.
+.venv/bin/python -m src.integration --term "metformin cardiovascular outcomes" --incremental
 ```
+
+`--incremental` keeps a per-term watermark in `.ingest_state.json` and
+narrows both sources to that window (PubMed by Entrez date, the registry
+by last-update date). Re-indexing an unchanged record updates it in
+place, so overlapping windows are harmless.
+
+There is no in-process scheduler. `config/settings.json` declares a
+`schedule` for the ingestion service; that value is the crontab line to
+use, and this command is what it should run:
+
+```cron
+0 2 * * *  cd /path/to/repo && .venv/bin/python -m src.integration --term "..." --incremental
+```
+
+Without a refresh the corpus silently stops representing the literature
+while retrieval keeps answering from it — which is why
+`/api/evidence/search` reports `retrieval_mode` on every response.
 
 Then query. Retrieval runs BM25 (OpenSearch), vector search (Qdrant,
 `all-MiniLM-L6-v2`) and graph traversal (Neo4j) over the same corpus and

@@ -164,4 +164,4 @@ experiments/
 
 # Configuration files that may contain sensitive data
 config/local_settings.json
-config/secrets.json
+config/secrets.json.ingest_state.json

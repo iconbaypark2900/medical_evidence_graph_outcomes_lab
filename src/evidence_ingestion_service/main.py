@@ -15,7 +15,7 @@ so ingestion feeds the graph directly.
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from src.data_ingestion import (
@@ -38,7 +38,7 @@ class EvidenceSource:
     last_updated: str
 
 
-IngestFn = Callable[[List[str], int], Awaitable[List[MedicalEvidence]]]
+IngestFn = Callable[..., Awaitable[List[MedicalEvidence]]]
 
 
 class EvidenceIngestionService:
@@ -70,7 +70,8 @@ class EvidenceIngestionService:
         ]
 
     async def fetch_sources(
-        self, search_terms: List[str], max_per_source: int = 5
+        self, search_terms: List[str], max_per_source: int = 5,
+        since: Optional[date] = None,
     ) -> List[MedicalEvidence]:
         """Retrieve real records for the given search terms.
 
@@ -83,7 +84,7 @@ class EvidenceIngestionService:
             raise ValueError("No search terms supplied; nothing to ingest")
 
         logger.info(f"Ingesting for {search_terms} (max {max_per_source} per source)")
-        evidence = await self._ingest(search_terms, max_per_source)
+        evidence = await self._ingest(search_terms, max_per_source, since)
         logger.info(f"Retrieved {len(evidence)} records")
         return evidence
 
