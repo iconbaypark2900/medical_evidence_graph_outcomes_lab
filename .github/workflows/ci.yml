@@ -35,11 +35,21 @@ jobs:
         # backing services. They run in the `integration` job below.
         run: python -m pytest -q --cov=src --cov-report=term-missing
 
-      - name: Fail if any known defect was silently fixed
+      - name: Report known defects
         # known_defect tests are xfail(strict), so a fixed bug turns into a
-        # hard failure -- the signal to drop the marker. This step makes that
-        # visible as its own line rather than buried in the run above.
-        run: python -m pytest -m known_defect -q
+        # hard failure -- and the run above already catches that. This step
+        # only surfaces the current list as its own line.
+        #
+        # pytest exits 5 when a marker selects nothing, which is the normal
+        # state here: there are currently no known defects. Treat 5 as
+        # success, but let a real failure (1) through.
+        run: |
+          python -m pytest -m known_defect -q || status=$?
+          if [ "${status:-0}" -eq 5 ]; then
+            echo "No known_defect tests registered — nothing outstanding."
+          elif [ "${status:-0}" -ne 0 ]; then
+            exit "$status"
+          fi
 
   # The ten retrieval tests that need real Neo4j, OpenSearch and Qdrant.
   #
