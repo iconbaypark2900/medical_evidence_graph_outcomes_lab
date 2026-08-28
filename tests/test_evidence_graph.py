@@ -334,12 +334,44 @@ def test_an_unknown_relation_is_refused(service):
 @pytest.mark.requires_stack
 async def test_triples_can_be_read_from_the_populated_graph(require_stack):
     """The graph this exists to embed is the one in Neo4j, not the
-    in-memory one the service builds for a demo."""
+    in-memory one the service builds for a demo.
+
+    Writes its own evidence rather than assuming the graph is already
+    populated: depending on whatever happens to be indexed passes on a
+    developer machine and fails on a fresh CI stack, which is what it did.
+    """
+    import neo4j
+
+    from src.integration import load_database_config
     from src.kge import load_triples_from_neo4j
 
-    triples = await load_triples_from_neo4j()
+    config = load_database_config()["neo4j"]
+    driver = neo4j.AsyncGraphDatabase.driver(
+        config["uri"], auth=(config["username"], config["password"]))
+    written = [
+        ("kgetest_1", "HAS_CONDITION", "kgetest heart failure"),
+        ("kgetest_1", "HAS_INTERVENTION", "kgetest dapagliflozin"),
+        ("kgetest_2", "HAS_CONDITION", "kgetest heart failure"),
+    ]
+    try:
+        async with driver.session() as session:
+            for head, relation, tail in written:
+                await session.run(
+                    f"MERGE (e:Evidence {{id: $head}}) "
+                    f"MERGE (n:Condition {{name: $tail}}) "
+                    f"MERGE (e)-[:{relation}]->(n)",
+                    head=head, tail=tail)
 
-    assert triples, "no triples in Neo4j; index a corpus first"
-    for head, relation, tail in triples[:5]:
-        assert relation.startswith("HAS_")
-        assert head and tail
+        triples = await load_triples_from_neo4j()
+
+        ours = [t for t in triples if t[0].startswith("kgetest_")]
+        assert len(ours) == len(written)
+        for head, relation, tail in ours:
+            assert relation.startswith("HAS_")
+            assert head and tail
+    finally:
+        async with driver.session() as session:
+            await session.run(
+                "MATCH (n) WHERE n.id STARTS WITH 'kgetest_' "
+                "OR n.name STARTS WITH 'kgetest ' DETACH DELETE n")
+        await driver.close()
