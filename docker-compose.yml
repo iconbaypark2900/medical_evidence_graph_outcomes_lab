@@ -65,7 +65,11 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:6333/health"]
+      # The image ships neither wget nor curl, and /health became /healthz,
+      # so the previous check could never pass -- a working Qdrant reported
+      # itself unhealthy. bash is present; this opens a TCP connection to
+      # the internal port.
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
