@@ -210,8 +210,13 @@ class OutcomesAnalyticsService:
         times, survival, lower, upper = (
             self.survival_models.kaplan_meier_with_confidence_intervals(duration, event))
 
+        # Tolerance, not a bare <= 0.5. The product-limit estimate is a
+        # running product of floats, so a curve that reaches exactly one
+        # half lands on 0.5000000000000001 as often as on 0.5 --
+        # (5/6)(4/5)(3/4) evaluates to the former -- and a bare comparison
+        # then reports the next event time as the median.
         median = next(
-            (float(t) for t, s in zip(times, survival) if s <= 0.5), None)
+            (float(t) for t, s in zip(times, survival) if s <= 0.5 + 1e-9), None)
 
         print(f"Survival analysis: {len(times)} time points, "
               f"median survival "

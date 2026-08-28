@@ -43,6 +43,15 @@ from sklearn.metrics import r2_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 
 from src.data_ingestion import ClinicalTrialsFetcher, PubMedFetcher
+from src.outcomes_analytics_service.main import (
+    CohortDefinition,
+    CohortError,
+    OutcomesAnalyticsService,
+)
+from src.pathway_guideline_service.main import (
+    ObservedPathway,
+    PathwayGuidelineService,
+)
 from src.enhanced_ml_models import (
     SurvivalAnalysisModels,
     CausalInferenceModels,
@@ -238,6 +247,69 @@ class CohortAnalysisRequest(BaseModel):
     alpha: float = Field(0.05, gt=0, lt=1, description="Significance level")
 
 
+class CohortCriteria(BaseModel):
+    """Inclusion / exclusion criteria, applied for real.
+
+    Each value is matched exactly, by membership if a list, or as an
+    inclusive range if a two-element [min, max].
+    """
+    inclusion: Dict[str, Any] = Field(default_factory=dict)
+    exclusion: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CohortBuildRequest(BaseModel):
+    cohort_id: str
+    name: str = "Cohort"
+    patients: List[PatientRecord] = Field(..., min_length=2)
+    criteria: CohortCriteria = Field(default_factory=CohortCriteria)
+    follow_up_period_days: int = Field(365, gt=0)
+
+
+class ComparativeEffectivenessRequest(CohortBuildRequest):
+    group_field: str = Field(
+        "treatment_group",
+        description="Field on each patient naming its arm; must be supplied")
+    groups: List[str] = Field(
+        ..., min_length=2,
+        description="Arm label per patient, in the same order as `patients`")
+
+
+class GuidelineStep(BaseModel):
+    name: str
+    description: str = ""
+    type: str = "intervention"
+    recommended: bool = True
+    timing: str = "immediate"
+    evidence_level: str = "unknown"
+
+
+class GuidelineDecisionPoint(BaseModel):
+    question: str
+    description: str = ""
+    options: List[str] = Field(default_factory=list)
+
+
+class GuidelineRequest(BaseModel):
+    id: str
+    name: str
+    condition: str
+    version: str = "1.0"
+    steps: List[GuidelineStep] = Field(..., min_length=1)
+    decision_points: List[GuidelineDecisionPoint] = Field(default_factory=list)
+
+
+class ObservedStep(BaseModel):
+    name: str
+    performed_at: Optional[str] = None
+
+
+class AdherenceRequest(BaseModel):
+    guideline_id: str
+    patient_id: str
+    condition: str
+    steps: List[ObservedStep] = Field(default_factory=list)
+
+
 class TrainRiskModelRequest(BaseModel):
     training_data: List[CohortMember] = Field(..., min_length=20)
     test_size: float = Field(0.25, gt=0.0, lt=1.0)
@@ -282,7 +354,11 @@ def median_survival_time(time_points: List[float], survival_probs: List[float]) 
     is unrelated to survival.
     """
     for time_point, survival in zip(time_points, survival_probs):
-        if survival <= 0.5:
+        # Tolerance: the product-limit estimate is a running product of
+        # floats, so a curve that reaches exactly one half can land on
+        # 0.5000000000000001 and a bare <= 0.5 then reports the next event
+        # time instead.
+        if survival <= 0.5 + 1e-9:
             return float(time_point)
     return None
 
@@ -355,6 +431,8 @@ class RiskModelRegistry:
 
 
 risk_model_registry = RiskModelRegistry()
+outcomes_service = OutcomesAnalyticsService()
+pathway_service = PathwayGuidelineService()
 survival_models = SurvivalAnalysisModels()
 causal_models = CausalInferenceModels()
 feature_builder = EnhancedOutcomeModels()
@@ -1031,6 +1109,256 @@ async def compare_cohorts(request: CohortAnalysisRequest, _key: str = Depends(re
                 ),
             },
         },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Outcomes analytics
+#
+# OutcomesAnalyticsService and PathwayGuidelineService were both working
+# and tested, and neither was reachable by any user of the product: the
+# API exposed ten endpoints and none of them touched either one.
+# ---------------------------------------------------------------------------
+
+def records_to_cohort_frame(
+    patients: List[PatientRecord], groups: Optional[List[str]] = None
+) -> pd.DataFrame:
+    """Patient records in the shape the outcomes service analyses."""
+    frame = patients_to_frame(patients)
+    frame["patient_id"] = [p.patient_id or f"patient_{i}"
+                           for i, p in enumerate(patients)]
+    frame["survival_time"] = [p.follow_up.observed_time_days for p in patients]
+    frame["event_status"] = [int(p.follow_up.event_observed) for p in patients]
+    if groups is not None:
+        frame["treatment_group"] = groups
+    return frame
+
+
+def build_cohort(request: CohortBuildRequest, groups: Optional[List[str]] = None):
+    definition = CohortDefinition(
+        id=request.cohort_id,
+        name=request.name,
+        # A two-element list means a range; the service applies it as one.
+        inclusion_criteria={
+            k: tuple(v) if isinstance(v, list) and len(v) == 2 and
+            all(isinstance(x, (int, float)) for x in v) else v
+            for k, v in request.criteria.inclusion.items()
+        },
+        exclusion_criteria=dict(request.criteria.exclusion),
+        follow_up_period=request.follow_up_period_days,
+        outcome_definition={},
+    )
+    frame = records_to_cohort_frame(request.patients, groups)
+    try:
+        cohort = outcomes_service.create_cohort(definition, frame)
+    except CohortError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    return definition, cohort
+
+
+@app.post("/api/outcomes/cohort")
+async def build_cohort_endpoint(request: CohortBuildRequest,
+                                _key: str = Depends(require_api_key)):
+    """Apply inclusion/exclusion criteria and report the resulting cohort.
+
+    Criteria are applied to the patients you supply. A criterion naming a
+    field that is not present is refused rather than skipped: skipping it
+    would silently produce a cohort broader than the one defined, and every
+    rate computed from it would be wrong with no sign of it.
+    """
+    definition, cohort = build_cohort(request)
+
+    try:
+        survival = outcomes_service.run_survival_analysis(cohort)
+    except CohortError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    return {
+        "status": "success",
+        "cohort_id": definition.id,
+        "size": int(len(cohort)),
+        "supplied": len(request.patients),
+        "excluded_by_criteria": len(request.patients) - int(len(cohort)),
+        "survival": {
+            "time_points": survival.time_points,
+            "survival_probabilities": survival.survival_probabilities,
+            # Greenwood intervals: they widen as the risk set shrinks,
+            # which the binomial standard error does not.
+            "confidence_intervals": survival.confidence_intervals,
+            "median_survival_days": survival.median_survival,
+            "events": survival.n_events,
+            "censored": survival.n_censored,
+        },
+    }
+
+
+@app.post("/api/outcomes/comparative-effectiveness")
+async def comparative_effectiveness(request: ComparativeEffectivenessRequest,
+                                    _key: str = Depends(require_api_key)):
+    """Compare arms with a log-rank test.
+
+    Arm assignment must be supplied. Inferring it here would make the
+    comparison a comparison of whatever rule did the inferring.
+    """
+    if len(request.groups) != len(request.patients):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{len(request.groups)} arm labels for "
+                   f"{len(request.patients)} patients")
+
+    definition, cohort = build_cohort(request, request.groups)
+
+    try:
+        result = outcomes_service.run_comparative_effectiveness_analysis(
+            cohort, request.group_field)
+        survival = outcomes_service.run_survival_analysis(cohort)
+    except CohortError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    return {
+        "status": "success",
+        "cohort_id": definition.id,
+        "group_outcomes": result.group_outcomes,
+        "test": result.comparison.test,
+        "test_statistic": result.comparison.test_statistic,
+        "p_value": result.comparison.p_value,
+        "degrees_of_freedom": result.comparison.degrees_of_freedom,
+        # A p-value with no denominators cannot be judged.
+        "group_sizes": result.comparison.group_sizes,
+        "group_events": result.comparison.group_events,
+        "risk_difference": result.risk_difference,
+        "number_needed_to_treat": result.number_needed_to_treat,
+        "median_survival_days": survival.median_survival,
+        "notes": result.notes,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pathways and guidelines
+# ---------------------------------------------------------------------------
+
+@app.post("/api/pathways/guidelines")
+async def register_guideline(request: GuidelineRequest,
+                             _key: str = Depends(require_api_key)):
+    """Register a guideline as a machine-readable pathway."""
+    pathway = pathway_service.represent_guideline_as_pathway({
+        "id": request.id,
+        "name": request.name,
+        "condition": request.condition,
+        "version": request.version,
+        "steps": [step.model_dump() for step in request.steps],
+        "decision_points": [d.model_dump() for d in request.decision_points],
+    })
+    return {
+        "status": "success",
+        "guideline_id": pathway.id,
+        "steps": len(request.steps),
+        "required_steps": sum(1 for s in request.steps if s.recommended),
+        "decision_points": len(request.decision_points),
+    }
+
+
+@app.get("/api/pathways/guidelines")
+async def list_guidelines(_key: str = Depends(require_api_key)):
+    return {
+        "status": "success",
+        "guidelines": [
+            {"id": g.id, "name": g.name, "condition": g.condition,
+             "version": g.version, "steps": len(g.nodes)}
+            for g in pathway_service.guidelines.values()
+        ],
+    }
+
+
+@app.post("/api/pathways/adherence")
+async def evaluate_adherence(request: AdherenceRequest,
+                             _key: str = Depends(require_api_key)):
+    """Score observed care against a registered guideline.
+
+    Adherence is recomputed from the observed steps. It is never taken
+    from the caller: a claimed adherence score reported back as a finding
+    would be worth nothing.
+    """
+    observed = ObservedPathway(
+        patient_id=request.patient_id,
+        condition=request.condition,
+        steps=[{"name": s.name} for s in request.steps],
+        timestamps=[s.performed_at or "" for s in request.steps],
+        outcomes=[],
+        adherence_score=0.0,
+    )
+
+    try:
+        comparison = pathway_service.compare_observed_to_recommended(
+            observed, request.guideline_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    return {
+        "status": "success",
+        "comparison": comparison,
+        "opportunities": pathway_service.highlight_optimization_opportunities(
+            comparison),
+    }
+
+
+@app.get("/api/pathways/guidelines/{guideline_id}/evidence")
+async def guideline_evidence(
+    guideline_id: str,
+    per_step: int = Query(3, ge=1, le=10),
+    searcher: EvidenceSearcher = Depends(get_evidence_searcher),
+    _key: str = Depends(require_api_key),
+):
+    """Retrieve current evidence for each step of a guideline.
+
+    This is the join the project is named for and did not have: the
+    evidence graph and the outcomes side ran entirely separately, so
+    "the literature says X" and "this pathway recommends Y" could not be
+    put next to each other. Each recommended step is used as a retrieval
+    query, and what comes back is reported with the mode that produced it
+    -- a step with no supporting evidence in the corpus is a finding worth
+    seeing, and is not the same as a step the literature does not support.
+    """
+    if guideline_id not in pathway_service.guidelines:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Guideline {guideline_id!r} is not registered. Known: "
+                   f"{sorted(pathway_service.guidelines)}")
+
+    pathway = pathway_service.guidelines[guideline_id]
+    steps = [n for n in pathway.nodes
+             if n["type"] != "decision" and n.get("recommended", True)]
+
+    findings = []
+    for step in steps:
+        query = f"{pathway.condition} {step['name']}"
+        response = await searcher.search(query, per_step)
+        findings.append({
+            "step": step["name"],
+            "query": query,
+            "retrieval_mode": response.mode,
+            "evidence": [
+                {"citation": r.get("citation", r.get("id")),
+                 "title": r.get("title", ""),
+                 "url": r.get("url", "")}
+                for r in response.results
+            ],
+            "supporting_records": len(response.results),
+        })
+
+    unsupported = [f["step"] for f in findings if not f["supporting_records"]]
+    return {
+        "status": "success",
+        "guideline_id": guideline_id,
+        "condition": pathway.condition,
+        "steps_examined": len(findings),
+        "findings": findings,
+        "steps_with_no_evidence_in_corpus": unsupported,
+        "note": (
+            "Retrieval over the indexed corpus. A step with no supporting "
+            "records means this corpus does not cover it, which is not a "
+            "statement about the literature or about the recommendation."
+        ),
     }
 
 

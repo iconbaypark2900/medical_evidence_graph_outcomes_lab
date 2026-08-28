@@ -1003,3 +1003,12 @@ def test_a_missing_config_file_does_not_silently_grant_access(tmp_path):
     """An unreadable config must yield no keys, not an empty allowlist that
     happens to authorise everything."""
     assert backend.load_api_keys(str(tmp_path / "nope.json")) == set()
+
+
+def test_a_median_landing_exactly_on_a_half_is_not_pushed_to_the_next_step():
+    """(5/6)(4/5)(3/4) evaluates to 0.5000000000000001, not 0.5, so a bare
+    `<= 0.5` reports the next event time as the median."""
+    assert median_survival_time(
+        [0.0, 10.0, 20.0, 30.0, 40.0],
+        [1.0, 5 / 6, (5 / 6) * (4 / 5), (5 / 6) * (4 / 5) * (3 / 4), 0.0],
+    ) == 30.0

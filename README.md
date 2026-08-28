@@ -70,7 +70,7 @@ The Medical Evidence Graph & Outcomes Insight Lab is a sophisticated platform de
 | Evidence storage (Neo4j + OpenSearch + Qdrant) | working — `src/integration.py` indexes into all three |
 | Graph-RAG hybrid retrieval | working — BM25 + vector + graph traversal, fused, with citations |
 | Evidence search API + frontend | working — served from the index, with a labelled live fallback |
-| Pathway & guideline service | working — adherence against a guideline, with tests |
+| Pathway & guideline service | working, and reachable — adherence, plus evidence per guideline step |
 | API authentication | API key + restricted CORS; OIDC/OPA still not integrated |
 | Vault / OPA / Presidio / MLflow / Langfuse | not integrated |
 
@@ -148,7 +148,12 @@ authenticated requests on a viewer's behalf.
 | `POST /api/survival-analysis/cox-regression` | Hazard ratios with 95% CIs and p-values |
 | `POST /api/causal-inference/ate-estimation` | ATE: unadjusted, matched, regression-adjusted |
 | `POST /api/cohorts/compare` | Two-cohort comparison with a named statistical test |
-| `GET /api/evidence/search` | Live PubMed + ClinicalTrials.gov retrieval |
+| `POST /api/outcomes/cohort` | Apply inclusion/exclusion criteria; KM curve with Greenwood intervals |
+| `POST /api/outcomes/comparative-effectiveness` | Log-rank comparison between arms, with NNT |
+| `POST /api/pathways/guidelines` | Register a guideline as a machine-readable pathway |
+| `POST /api/pathways/adherence` | Score observed care against a guideline |
+| `GET /api/pathways/guidelines/{id}/evidence` | **Current evidence for each step of a guideline** |
+| `GET /api/evidence/search` | Retrieval over the indexed corpus, live fallback |
 
 **Every analysis endpoint requires the observed outcome as part of the
 request.** A survival request carries `follow_up` per patient, a causal
