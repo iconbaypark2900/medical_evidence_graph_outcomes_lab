@@ -3,11 +3,15 @@ Main entry point for the Evidence Graph Service
 """
 import asyncio
 import hashlib
+import logging
 import math
 from typing import Any, Dict, List, Set
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+
+
+logger = logging.getLogger(__name__)
 
 
 def entity_id(label: str, name: str) -> str:
@@ -167,26 +171,105 @@ class EvidenceGraphService:
             adjacency[edge.target].add(edge.source)
         return adjacency
 
-    def recompute_kge_features(self):
-        """Knowledge-graph embeddings. Not implemented.
+    def recompute_kge_features(self, model_name: str = "distmult",
+                               dim: int = 64, epochs: int = 300,
+                               triples=None, seed: int = 0):
+        """Train knowledge graph embeddings and report whether to use them.
 
-        This used to return `np.random.rand(128)` per node and
-        `np.random.rand(64)` per edge as "embeddings". Random vectors are
-        not embeddings: they encode nothing about the graph, and anything
-        computed from them — similarity, link prediction, clustering — is
-        a property of the random number generator. Returning them under
-        this name meant downstream code could not tell an untrained
-        service from a trained one.
+        This used to return `np.random.rand(128)` per node as "embeddings",
+        then an honest NotImplementedError pointing at the work this now
+        does.
 
-        A real implementation needs a trained model (PyKEEN's TransE or
-        similar) over a populated Neo4j graph. Until then, use
-        `suggest_related_entities`, which scores candidates from the graph
-        structure that actually exists.
+        Returns the evaluation report whether or not the model is worth
+        serving. A link predictor that loses to "suggest whatever usually
+        appears with this relation" is complexity without benefit, and
+        serving it anyway would be the random-confidence problem again in a
+        more convincing costume -- so `beats_baselines` in the report is
+        what decides, and a losing model is reported as losing.
         """
-        raise NotImplementedError(
-            "KGE embeddings require a model trained on a populated graph. "
-            "No model is available. Use suggest_related_entities() for "
-            "structure-based link suggestion in the meantime.")
+        from src.kge import build_and_evaluate
+
+        if triples is None:
+            triples = [
+                (edge.source, edge.relationship, edge.target)
+                for edge in self.edges.values()
+            ]
+        if not triples:
+            raise ValueError(
+                "The graph holds no edges; there is nothing to embed. Index a "
+                "corpus first (python -m src.integration).")
+
+        model, store, report = build_and_evaluate(
+            triples, model_name=model_name, dim=dim, epochs=epochs, seed=seed)
+
+        self.kge_model = model
+        self.kge_store = store
+        self.kge_report = report
+
+        logger.info(
+            f"{model_name}: MRR {report.evaluation.mrr:.4f}, "
+            f"beats baselines {report.beats_baselines}")
+        return report
+
+    def kge_suggestions(self, head: str, relation: str, limit: int = 5):
+        """Rank candidate tails with the trained embeddings.
+
+        Refuses when no model has been trained, and when the trained model
+        did not beat its baselines -- in which case the honest answer is to
+        use `suggest_related_entities`, which is the predictor that
+        actually won.
+        """
+        model = getattr(self, "kge_model", None)
+        report = getattr(self, "kge_report", None)
+
+        if report is None:
+            raise RuntimeError(
+                "No embeddings have been trained. Call recompute_kge_features.")
+
+        # Arguments are validated before the serving gate. An unknown
+        # entity is a caller error whether or not the model was good
+        # enough to serve, and reporting it as "the model lost" would send
+        # the reader to fix the wrong thing.
+        store = self.kge_store
+        if head not in store.entity_index:
+            raise KeyError(
+                f"{head!r} has no embedding: it was not in the training graph")
+        if relation not in store.relation_index:
+            raise KeyError(
+                f"Unknown relation {relation!r}; known: {store.relations}")
+
+        if model is None:
+            raise RuntimeError(
+                f"The trained model did not beat its baselines "
+                f"(MRR {report.evaluation.mrr:.4f} against "
+                f"{[f'{b.model} {b.mrr:.4f}' for b in report.baselines]}), so "
+                f"its suggestions are not served. Use "
+                f"suggest_related_entities.")
+
+        from src.kge import kge_scorer
+
+        scores = kge_scorer(model, store)(head, relation, store.entities)
+        known = {edge.target for edge in self.edges.values()
+                 if edge.source == head and edge.relationship == relation}
+
+        ranked = sorted(zip(store.entities, scores), key=lambda pair: -pair[1])
+        suggestions = []
+        for entity, score in ranked:
+            if entity == head or entity in known:
+                continue
+            suggestions.append({
+                "target": entity,
+                "score": float(score),
+                "scoring_method": f"kge:{report.parameters['model']}",
+                "relationship_type": relation,
+                # The score is a model output, not a probability. Shipping
+                # the evaluation with it is what makes it checkable.
+                "model_mrr": round(report.evaluation.mrr, 4),
+                "model_hits_at_10": round(report.evaluation.hits_at_10, 4),
+            })
+            if len(suggestions) >= limit:
+                break
+        return suggestions
 
     def suggest_related_entities(
         self,

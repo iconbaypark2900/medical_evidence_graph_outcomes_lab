@@ -66,7 +66,7 @@ The Medical Evidence Graph & Outcomes Insight Lab is a sophisticated platform de
 | Streamlit clinical frontend | working against the API above |
 | Evidence ingestion service | working; entities come from curated NLM/registry metadata, not keyword matching |
 | Outcomes analytics service | working; cohort criteria applied for real, log-rank tests for group comparison |
-| Evidence graph service | link suggestion working (Adamic-Adar over the real graph); **KGE embeddings not implemented** — `recompute_kge_features` raises rather than returning random vectors |
+| Evidence graph service | link suggestion (Adamic-Adar) and knowledge graph embeddings, both evaluated against baselines before being served |
 | Evidence storage (Neo4j + OpenSearch + Qdrant) | working — `src/integration.py` indexes into all three |
 | Graph-RAG hybrid retrieval | working — BM25 + vector + graph traversal, fused, with citations |
 | Evidence search API + frontend | working — served from the index, with a labelled live fallback |
@@ -237,6 +237,38 @@ it and at what rank, and the condition/intervention/outcome context from
 the graph. The reported `coverage` measures how many retrievers agreed —
 it is a statement about retrieval consensus, not about whether the
 evidence answers the question.
+
+### Knowledge graph embeddings
+
+```bash
+.venv/bin/python -m src.kge          # train and evaluate over the Neo4j graph
+```
+
+Trains TransE or DistMult on the triples in Neo4j and scores it with
+filtered MRR and Hits@K on held-out triples, against a frequency baseline
+("suggest whatever usually appears with this relation") and Adamic-Adar.
+
+**A model is served only if it beats every baseline on MRR.** A link
+predictor that loses to guessing the commonest tail is complexity without
+benefit, and serving it anyway would be the random-confidence problem in a
+more convincing costume. On the 607-triple corpus indexed here:
+
+| model | MRR | Hits@1 | Hits@10 |
+|---|---|---|---|
+| DistMult | **0.527** | 0.386 | 0.796 |
+| TransE | 0.309 | 0.159 | 0.614 |
+| frequency baseline | 0.457 | — | **0.886** |
+| Adamic-Adar | 0.035 | — | 0.000 |
+
+TransE loses to the baseline and is refused. DistMult wins on MRR and is
+served — but it loses on Hits@10, which the report states rather than
+averages away. Adamic-Adar's number is not a verdict on its use in the
+service: there it ranks entities against entities, and this evaluation
+asks it for evidence-to-entity tail prediction, which is not what it
+measures.
+
+Each served suggestion carries the model's held-out MRR, and the score is
+called a score rather than a confidence, because it is not a probability.
 
 ### Analysis library directly
 

@@ -125,14 +125,6 @@ def test_re_extracting_the_same_evidence_does_not_duplicate_nodes(service):
 # Embeddings
 # --------------------------------------------------------------------------
 
-def test_kge_features_are_refused_rather_than_generated(service):
-    """Random vectors are not embeddings, and anything computed from them
-    is a property of the RNG. Untrained must be distinguishable from
-    trained."""
-    with pytest.raises(NotImplementedError, match="require a model trained"):
-        service.recompute_kge_features()
-
-
 # --------------------------------------------------------------------------
 # Link suggestion
 # --------------------------------------------------------------------------
@@ -240,3 +232,114 @@ def test_a_node_with_no_shared_neighbours_yields_nothing():
     service.add_node(GraphNode(id="other", label="Intervention", properties={"name": "i"}))
 
     assert service.suggest_related_entities("lonely") == []
+
+
+# --------------------------------------------------------------------------
+# Knowledge graph embeddings
+#
+# recompute_kge_features returned np.random.rand(128) per node, then an
+# honest NotImplementedError. It now trains a real model -- and refuses to
+# serve one that loses to its baselines, which is the same judgement the
+# NotImplementedError was standing in for.
+# --------------------------------------------------------------------------
+
+def learnable_triples(n_docs: int = 90, n_topics: int = 6) -> list:
+    """Documents in topics, each topic with its own vocabulary.
+
+    Enough distinct entities that "guess the commonest tail" is a real
+    opponent rather than a formality -- otherwise the gate would pass
+    without the model having learned anything.
+    """
+    triples = []
+    for i in range(n_docs):
+        topic = i % n_topics
+        for k in range(3):
+            triples.append((f"doc_{i}", "HAS_CONDITION", f"condition_{topic}_{k}"))
+            triples.append((f"doc_{i}", "HAS_INTERVENTION", f"drug_{topic}_{k}"))
+    return triples
+
+
+def test_training_returns_an_evaluation_report(service):
+    report = service.recompute_kge_features(
+        triples=learnable_triples(), epochs=60, dim=16)
+
+    described = report.describe()
+    assert described["model"]["n_test_triples"] > 0
+    assert "beats_baselines" in described
+    assert set(described["comparison"]) == {"frequency", "adamic_adar"}
+
+
+def test_an_empty_graph_cannot_be_embedded(service):
+    empty = EvidenceGraphService()
+
+    with pytest.raises(ValueError, match="no edges"):
+        empty.recompute_kge_features()
+
+
+def test_suggestions_before_training_are_refused(service):
+    with pytest.raises(RuntimeError, match="No embeddings have been trained"):
+        service.kge_suggestions("doc_0", "HAS_CONDITION")
+
+
+def test_suggestions_from_a_losing_model_are_refused(service, monkeypatch):
+    """The judgement the NotImplementedError used to stand in for: a
+    predictor that loses to its baselines is not served, however
+    sophisticated its scores look."""
+    import src.kge as kge
+    from src.kge import Evaluation
+
+    monkeypatch.setattr(
+        kge, "evaluate_ranking",
+        lambda score_fn, store, test, all_triples, name:
+            Evaluation(name, 0.01, 0.0, 0.0, 0.0, 10, 99.0) if name != "frequency"
+            else Evaluation(name, 0.9, 0.9, 0.9, 0.9, 10, 1.0))
+
+    service.recompute_kge_features(triples=learnable_triples(), epochs=5, dim=8)
+
+    with pytest.raises(RuntimeError, match="did not beat its baselines"):
+        service.kge_suggestions("doc_0", "HAS_CONDITION")
+
+
+def test_suggestions_carry_the_evaluation_that_justifies_them(service):
+    """A model score is not a probability; shipping the held-out metric
+    with it is what makes the number checkable."""
+    report = service.recompute_kge_features(
+        triples=learnable_triples(), epochs=200, dim=32)
+    if not report.beats_baselines:
+        pytest.skip("model did not beat baselines on this seed; nothing served")
+
+    suggestions = service.kge_suggestions("doc_0", "HAS_INTERVENTION", limit=3)
+
+    assert suggestions
+    for suggestion in suggestions:
+        assert suggestion["scoring_method"].startswith("kge:")
+        assert suggestion["model_mrr"] == round(report.evaluation.mrr, 4)
+        assert "confidence" not in suggestion
+
+
+def test_an_entity_with_no_embedding_is_refused(service):
+    service.recompute_kge_features(triples=learnable_triples(), epochs=5, dim=8)
+
+    with pytest.raises(KeyError, match="no embedding"):
+        service.kge_suggestions("never_seen", "HAS_CONDITION")
+
+
+def test_an_unknown_relation_is_refused(service):
+    service.recompute_kge_features(triples=learnable_triples(), epochs=5, dim=8)
+
+    with pytest.raises(KeyError, match="Unknown relation"):
+        service.kge_suggestions("doc_0", "CURES")
+
+
+@pytest.mark.requires_stack
+async def test_triples_can_be_read_from_the_populated_graph(require_stack):
+    """The graph this exists to embed is the one in Neo4j, not the
+    in-memory one the service builds for a demo."""
+    from src.kge import load_triples_from_neo4j
+
+    triples = await load_triples_from_neo4j()
+
+    assert triples, "no triples in Neo4j; index a corpus first"
+    for head, relation, tail in triples[:5]:
+        assert relation.startswith("HAS_")
+        assert head and tail
