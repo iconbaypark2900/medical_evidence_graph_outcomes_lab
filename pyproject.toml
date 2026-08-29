@@ -7,7 +7,7 @@ name = "medical-evidence-graph-outcomes-lab"
 version = "0.1.0"
 description = "Evidence-based medicine platform: medical knowledge graph, outcomes analytics, and graph-RAG over published literature."
 requires-python = ">=3.11"
-license = { text = "Proprietary" }
+license = { text = "Apache-2.0" }
 
 # Only the dependencies the currently-exercised code paths import. The full
 # intended stack (neo4j, opensearch, qdrant, transformers, spacy, mlflow,
