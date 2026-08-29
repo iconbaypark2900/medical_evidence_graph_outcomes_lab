@@ -290,3 +290,130 @@ async def test_no_window_means_fetch_everything():
     await service.fetch_sources(["heart failure"], 5)
 
     assert service.ingest_calls[0][2] is None
+
+
+# --------------------------------------------------------------------------
+# MeSH descriptors reach the axis their tree names
+# --------------------------------------------------------------------------
+
+def mesh_service(*records):
+    """A service whose classifier is seeded and offline."""
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from src.mesh import MeshClassifier
+
+    cache = Path(tempfile.mkdtemp()) / "mesh.json"
+    cache.write_text(json.dumps({
+        "heart failure": ["C14.280.434"],
+        "treatment outcome": ["E01.789.800"],
+        "kidney": ["A05.810.453"],
+        "stroke volume": ["G09.330.553.700"],
+        "aged": ["M01.060.116"],
+        "metformin": ["D02.078.370.141.450"],
+    }))
+
+    async def fake_ingest(search_terms, max_per_source, since=None):
+        return list(records)
+
+    return EvidenceIngestionService(
+        ingest_fn=fake_ingest,
+        mesh_classifier=MeshClassifier(cache, offline=True))
+
+
+PUBMED_RECORD = MedicalEvidence(
+    id="pubmed_1", title="Dapagliflozin in heart failure",
+    abstract="A trial.", pub_date="2019", authors=[], journal="NEJM",
+    source="PubMed", pmid="1",
+    mesh_terms=["Heart Failure", "Treatment Outcome", "Kidney",
+                "Stroke Volume", "Aged"],
+    entities={"conditions": ["Heart Failure", "Treatment Outcome", "Kidney",
+                             "Stroke Volume"],
+              "interventions": ["dapagliflozin"], "outcomes": ["mortality"],
+              "populations": ["Aged"]},
+)
+
+
+def test_misfiled_descriptors_leave_the_condition_axis():
+    """Treatment Outcome, Kidney and Stroke Volume were among the
+    highest-degree Condition nodes in the corpus."""
+    entities = mesh_service()._entities_for(PUBMED_RECORD)
+
+    assert entities["conditions"] == ["Heart Failure"]
+    for misfiled in ("Treatment Outcome", "Kidney", "Stroke Volume"):
+        assert misfiled not in entities["conditions"]
+
+
+def test_the_chemical_list_still_supplies_interventions():
+    entities = mesh_service()._entities_for(PUBMED_RECORD)
+
+    assert "dapagliflozin" in entities["interventions"]
+
+
+def test_check_tags_still_supply_populations():
+    entities = mesh_service()._entities_for(PUBMED_RECORD)
+
+    assert "Aged" in entities["populations"]
+
+
+def test_qualifier_outcomes_are_untouched():
+    entities = mesh_service()._entities_for(PUBMED_RECORD)
+
+    assert entities["outcomes"] == ["mortality"]
+
+
+def test_registry_entities_are_not_run_through_a_mesh_lookup():
+    """ClinicalTrials.gov supplies its own conditions and interventions,
+    already typed by the registry. A MeSH lookup would fail to find
+    "COVID-19" as indexed there and strip a correct entity out.
+    """
+    trial = MedicalEvidence(
+        id="trial_NCT1", title="A trial", abstract="", pub_date="2021",
+        authors=[], journal="ClinicalTrials.gov", source="ClinicalTrials.gov",
+        nct_id="NCT1", mesh_terms=["COVID-19"],
+        entities={"conditions": ["COVID-19"],
+                  "interventions": ["Dapagliflozin 10 milligram (mg)"],
+                  "outcomes": ["Time to recovery"], "populations": ["ADULT"]},
+    )
+
+    entities = mesh_service()._entities_for(trial)
+
+    assert entities["conditions"] == ["COVID-19"]
+    assert entities["interventions"] == ["Dapagliflozin 10 milligram (mg)"]
+
+
+def test_an_unclassifiable_descriptor_is_not_forced_onto_an_axis():
+    record = MedicalEvidence(
+        id="pubmed_2", title="T", abstract="", pub_date="2020", authors=[],
+        journal="J", source="PubMed", pmid="2",
+        mesh_terms=["Some Descriptor Not In The Cache"],
+        entities={"conditions": ["Some Descriptor Not In The Cache"],
+                  "interventions": [], "outcomes": [], "populations": []},
+    )
+
+    entities = mesh_service()._entities_for(record)
+
+    assert entities["conditions"] == []
+
+
+def test_unclassified_descriptors_stay_searchable():
+    """They remain in mesh_terms, so OpenSearch still finds them; they
+    simply stop being entity nodes.
+
+    Dropping them entirely would trade one loss for another: the point is
+    that they are not conditions, not that they are worthless.
+    """
+    from src.integration import evidence_to_document
+
+    service = mesh_service()
+    record = MedicalEvidence(**{**vars(PUBMED_RECORD)})
+    record.entities = service._entities_for(record)
+
+    document = evidence_to_document(record)
+
+    # Off the entity axis...
+    assert "Treatment Outcome" not in document["conditions"]
+    # ...but still indexed, and still findable.
+    assert "Treatment Outcome" in document["mesh_terms"]
+    assert "Kidney" in document["mesh_terms"]

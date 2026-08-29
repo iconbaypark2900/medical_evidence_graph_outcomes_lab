@@ -242,6 +242,26 @@ the graph. The reported `coverage` measures how many retrievers agreed —
 it is a statement about retrieval consensus, not about whether the
 evidence answers the question.
 
+### Entity classification
+
+MeSH descriptors are routed onto the axis their **tree number** names —
+`C` is Diseases, `D` Chemicals, `A` Anatomy, `E05` Investigative
+Techniques, `M` Named Groups — rather than every non-chemical descriptor
+being filed as a condition, which put *Treatment Outcome*, *Kidney*,
+*Double-Blind Method*, *Stroke Volume* and *Primary Prevention* among the
+highest-degree `Condition` nodes.
+
+```bash
+.venv/bin/python -m src.mesh    # refresh the tree cache after new topics
+```
+
+`data/mesh_tree_cache.json` ships with the repository so ingestion
+classifies offline. A descriptor with no cached tree is recorded as
+unknown and kept off the entity axes — it stays in `mesh_terms`, so
+OpenSearch still finds it, but it does not claim to be a clinical entity.
+ClinicalTrials.gov entities bypass this: the registry already types its
+own condition and intervention fields.
+
 ### Knowledge graph embeddings
 
 ```bash

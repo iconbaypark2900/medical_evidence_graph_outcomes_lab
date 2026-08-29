@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from src.mesh import MeshClassifier
 from src.data_ingestion import (
     MedicalEvidence,
     extract_entities_from_text,
@@ -42,9 +43,13 @@ IngestFn = Callable[..., Awaitable[List[MedicalEvidence]]]
 
 
 class EvidenceIngestionService:
-    def __init__(self, ingest_fn: Optional[IngestFn] = None):
+    def __init__(self, ingest_fn: Optional[IngestFn] = None,
+                 mesh_classifier: Optional[MeshClassifier] = None):
         # Injectable so the pipeline can be exercised without network access.
         self._ingest = ingest_fn or ingest_medical_evidence
+        # Routes MeSH descriptors onto the axis their tree number says they
+        # belong to. Cached on disk; see src/mesh.py.
+        self.mesh = mesh_classifier or MeshClassifier()
 
     async def __aenter__(self):
         return self
@@ -120,8 +125,15 @@ class EvidenceIngestionService:
         """
         curated = item.entities or {}
         if any(curated.get(axis) for axis in self.AXES):
-            return {axis: list(dict.fromkeys(curated.get(axis) or []))
-                    for axis in self.AXES}
+            entities = {axis: list(dict.fromkeys(curated.get(axis) or []))
+                        for axis in self.AXES}
+            # MeSH descriptors only. ClinicalTrials.gov supplies its own
+            # conditions and interventions in dedicated fields, which the
+            # registry has already typed correctly -- running them through
+            # a MeSH lookup would only fail to find them and strip them out.
+            if item.source == "PubMed" and item.mesh_terms:
+                entities = self._route_mesh_descriptors(item, entities)
+            return entities
 
         text = " ".join(filter(None, [item.title, item.abstract]))
         if not text:
@@ -137,6 +149,44 @@ class EvidenceIngestionService:
             "interventions": found.get("interventions", []),
             "outcomes": found.get("outcomes", []),
             "populations": found.get("populations", []),
+        }
+
+    def _route_mesh_descriptors(self, item: MedicalEvidence,
+                                entities: Dict[str, List[str]]) -> Dict[str, List[str]]:
+        """Put each MeSH descriptor on the axis its tree number names.
+
+        Curated extraction filed every non-chemical descriptor as a
+        condition. Measured against the corpus, roughly half the
+        highest-degree Condition nodes were not conditions: Treatment
+        Outcome, Double-Blind Method, Kidney, Primary Prevention, Stroke
+        Volume. Those are outcomes, study designs, anatomy and
+        measurements, and as diseases they were both wrong and useless.
+
+        A descriptor with no usable tree is left off the entity axes
+        rather than defaulted onto one -- defaulting is the defect. It
+        stays in mesh_terms, so it remains searchable in OpenSearch
+        without claiming to be a clinical entity.
+        """
+        routed = self.mesh.split_descriptors(item.mesh_terms)
+
+        chemicals = set(entities.get("interventions") or [])
+        conditions = [c for c in routed["conditions"] if c not in chemicals]
+        interventions = list(dict.fromkeys(
+            (entities.get("interventions") or []) + routed["interventions"]))
+        populations = list(dict.fromkeys(
+            (entities.get("populations") or []) + routed["populations"]))
+
+        if routed["other"]:
+            logger.debug(
+                f"{item.id}: {len(routed['other'])} MeSH descriptors are not "
+                f"conditions, interventions or populations; kept as mesh_terms "
+                f"only")
+
+        return {
+            "conditions": conditions,
+            "interventions": interventions,
+            "outcomes": entities.get("outcomes") or [],
+            "populations": populations,
         }
 
     def parse_normalize(self, evidence: List[MedicalEvidence]) -> List[Dict[str, Any]]:

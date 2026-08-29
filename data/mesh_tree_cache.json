@@ -1,0 +1,702 @@
+{
+ "acute kidney injury": [
+  "C12.050.351.968.419.780.050",
+  "C12.200.777.419.780.050",
+  "C12.950.419.780.050"
+ ],
+ "acute kidney injury due to circulatory failure": [],
+ "acute myocardial infarction": [],
+ "administration & dosage": [],
+ "adolescent": [
+  "M01.060.057"
+ ],
+ "adult": [
+  "M01.060.116"
+ ],
+ "adverse effects": [
+  "Y07.020",
+  "Y10.020"
+ ],
+ "advisory committees": [
+  "N03.706.742.500"
+ ],
+ "age factors": [
+  "N05.715.350.075",
+  "N06.850.490.250"
+ ],
+ "aged": [
+  "M01.060.116.100"
+ ],
+ "aged, 80 and over": [
+  "M01.060.116.100.080"
+ ],
+ "albuminuria": [
+  "C12.050.351.968.934.734.269",
+  "C12.200.777.934.734.269",
+  "C12.950.934.734.269",
+  "C23.888.942.750.269"
+ ],
+ "aliskiren + valsartan": [],
+ "analysis": [
+  "Y01"
+ ],
+ "anemia": [
+  "C15.378.050"
+ ],
+ "angiotensin receptor antagonists": [
+  "D057911"
+ ],
+ "antagonists & inhibitors": [
+  "Y03.030",
+  "Y07.040"
+ ],
+ "atherosclerosis": [
+  "C14.907.137.126.307"
+ ],
+ "atherosclerotic cardiovascular disease": [],
+ "atorvastatin 80mg": [],
+ "atrial fibrillation": [
+  "C14.280.067.198",
+  "C23.550.073.198"
+ ],
+ "benzhydryl compounds": [
+  "D02.455.426.559.389.115"
+ ],
+ "biomarkers": [
+  "D23.101"
+ ],
+ "blood": [
+  "Y01.010",
+  "Y08.040.020"
+ ],
+ "blood glucose": [
+  "D09.947.875.359.448.500"
+ ],
+ "body mass index": [
+  "E01.370.600.115.100.125",
+  "E05.041.124.125",
+  "G07.100.100.125",
+  "N06.850.505.200.100.175"
+ ],
+ "breast neoplasms": [
+  "C04.588.180",
+  "C17.800.090.500"
+ ],
+ "cancer": [
+  "C04"
+ ],
+ "cardiac": [
+  "A07.541"
+ ],
+ "cardiac disease": [
+  "C14.280"
+ ],
+ "cardiac surgery": [
+  "H02.403.810.803"
+ ],
+ "cardio respiratory arrest": [
+  "C14.280.383"
+ ],
+ "cardio-pulmonary bypass": [],
+ "cardio-renal syndrome": [
+  "C12.050.351.968.419.780.400",
+  "C12.200.777.419.780.400",
+  "C12.950.419.780.400",
+  "C14.280.434.156"
+ ],
+ "cardiopulmonary arrest with successful resuscitation": [],
+ "cardiopulmonary disease": [
+  "C14.280.832"
+ ],
+ "cardiothoracic surgery": [],
+ "cardiovascular diseases": [
+  "C14"
+ ],
+ "case-control studies": [
+  "E05.318.372.500.500",
+  "N05.715.360.330.500.500",
+  "N06.850.520.450.500.500"
+ ],
+ "cause of death": [
+  "E05.318.308.985.550.250",
+  "N01.224.935.698.100",
+  "N06.850.505.400.975.550.250",
+  "N06.850.520.308.985.550.250"
+ ],
+ "change in cognition, unit on a scale.": [],
+ "change in fasting unscaled flow mediated dilation (fmd) of the brachial artery": [],
+ "change in hemoglobin levels": [],
+ "chemically induced": [
+  "Y05.010"
+ ],
+ "child": [
+  "M01.060.406"
+ ],
+ "chronic disease": [
+  "C23.550.291.500"
+ ],
+ "circulating endothelial microparticles": [],
+ "classification": [
+  "Y19"
+ ],
+ "clinical trials as topic": [
+  "E05.318.372.250.250",
+  "N05.715.360.330.250.250",
+  "N06.850.520.450.250.250"
+ ],
+ "cognitive decline": [
+  "F03.615.250.700"
+ ],
+ "cognitive impairment": [
+  "F03.615.250.700"
+ ],
+ "comorbidity": [
+  "N05.715.350.225",
+  "N06.850.490.687"
+ ],
+ "comparative effectiveness research": [
+  "H01.770.644.145.360.500",
+  "N05.425.157"
+ ],
+ "completion of total cholesterol and hdl cholesterol test or full lipid panel": [],
+ "complications": [
+  "Y05.020"
+ ],
+ "coronary artery bypass surgery": [
+  "E04.100.376.719.332",
+  "E04.100.814.868.750",
+  "E04.928.220.520.220"
+ ],
+ "coronary artery disease": [
+  "C14.280.647.250.260",
+  "C14.907.137.126.339",
+  "C14.907.585.250.260"
+ ],
+ "cvd": [],
+ "dapagliflozin": [],
+ "dapagliflozin 10mg tab": [],
+ "death": [
+  "C23.550.260"
+ ],
+ "dementia": [
+  "C10.228.140.380",
+  "F03.615.400"
+ ],
+ "diabetes": [
+  "C18.452.394.750",
+  "C19.246"
+ ],
+ "diabetes complications": [
+  "C19.246.099"
+ ],
+ "diabetes mellitus": [
+  "C18.452.394.750",
+  "C19.246"
+ ],
+ "diabetes mellitus, type 2": [
+  "C18.452.394.750.149",
+  "C19.246.300"
+ ],
+ "diabetic neuropathies": [
+  "C10.668.829.300",
+  "C19.246.099.937"
+ ],
+ "diagnosis": [
+  "Y04"
+ ],
+ "dipeptidyl-peptidase iv inhibitors": [
+  "D054873"
+ ],
+ "diuretics": [
+  "D004232"
+ ],
+ "dose-response relationship, drug": [
+  "G07.690.773.875",
+  "G07.690.936.500"
+ ],
+ "double-blind method": [
+  "E05.318.370.300",
+  "E05.581.500.300",
+  "N05.715.360.325.320",
+  "N06.850.520.445.300"
+ ],
+ "dppos boost lifestyle": [],
+ "dppos group lifestyle": [],
+ "drug effects": [
+  "Y21"
+ ],
+ "drug interactions": [
+  "G07.690.773.968"
+ ],
+ "drug therapy": [
+  "Y11.020"
+ ],
+ "drug therapy, combination": [
+  "E02.319.310"
+ ],
+ "dyslipidemias": [
+  "C18.452.584.500"
+ ],
+ "echo program for dmmc": [],
+ "empagliflozin": [],
+ "enavogliflozin": [],
+ "endothelial injury": [],
+ "epidemiology": [
+  "Y09.010"
+ ],
+ "etiology": [
+  "Y05"
+ ],
+ "exercise": [
+  "G11.427.410.698.277",
+  "I03.350"
+ ],
+ "eye diseases": [
+  "C11"
+ ],
+ "female": [
+  "X999999"
+ ],
+ "finerenone": [],
+ "finger 2.0 multidomain lifestyle-based intervention": [],
+ "follow-up studies": [
+  "E05.318.372.500.750.249",
+  "N05.715.360.330.500.750.350",
+  "N06.850.520.450.500.750.350"
+ ],
+ "gefarnate": [
+  "D02.455.849.440",
+  "D10.251.355.350"
+ ],
+ "geographic atrophy": [
+  "C11.768.585.439.122"
+ ],
+ "glimepiride": [],
+ "glomerular filtration rate": [
+  "E01.370.390.400.300",
+  "G08.852.357"
+ ],
+ "glucagon-like peptide 1": [
+  "D06.472.317.680.500.500"
+ ],
+ "glucagon-like peptide-1 receptor": [
+  "D12.776.543.750.695.021.500",
+  "D12.776.543.750.750.360.100.500"
+ ],
+ "glucagon-like peptide-1 receptor agonists": [
+  "D000097789"
+ ],
+ "glucose": [
+  "D09.947.875.359.448"
+ ],
+ "glucosides": [
+  "D09.408.348"
+ ],
+ "glycated hemoglobin": [
+  "D09.400.205.625.500.250",
+  "D09.400.430.825.500.250",
+  "D12.776.124.400.354",
+  "D12.776.395.351.500.250",
+  "D12.776.422.316.762.350",
+  "D23.946.381.625.500.250"
+ ],
+ "green tea extract - catechins": [],
+ "guideline-directed medical therapy (gdmt)": [],
+ "hba1c level in control": [],
+ "hba1c trajectory": [],
+ "health status": [
+  "I01.240.425",
+  "N01.224.425",
+  "N06.850.505.400.425"
+ ],
+ "heart diseases": [
+  "C14.280"
+ ],
+ "heart failure": [
+  "C14.280.434"
+ ],
+ "heart failure - nyha ii - iv": [],
+ "heart failure, systolic": [
+  "C14.280.434.676"
+ ],
+ "heart shock": [
+  "C14.280.647.500.750",
+  "C14.907.585.500.750",
+  "C23.550.513.355.750.750",
+  "C23.550.717.489.750.750",
+  "C23.550.835.550"
+ ],
+ "heart valve diseases": [
+  "C14.280.484"
+ ],
+ "hematopoietic stem cell transplant (hsct)": [],
+ "high intensity exercise": [],
+ "hospitalization": [
+  "E02.760.400",
+  "N02.421.585.400"
+ ],
+ "humans": [
+  "B01.050.150.900.649.313.988.400.112.400.400"
+ ],
+ "hydroxymethylglutaryl-coa reductase inhibitors": [
+  "D019161"
+ ],
+ "hypercholesterolemia": [
+  "C18.452.584.500.500.396"
+ ],
+ "hypertension": [
+  "C14.907.489"
+ ],
+ "hypoglycemic agents": [
+  "D007004"
+ ],
+ "insulin": [
+  "D06.472.699.587.200.500.625",
+  "D12.644.548.586.200.500.625"
+ ],
+ "insulin glargine": [
+  "D06.472.699.587.200.300.100",
+  "D12.644.548.586.200.300.100"
+ ],
+ "insulin, regular, human": [
+  "D06.472.699.587.200.500.625.500",
+  "D12.644.548.586.200.500.625.500"
+ ],
+ "intensive lifestyle group session": [],
+ "iron carboxymaltose": [],
+ "iron deficiencies": [
+  "C18.452.565.400"
+ ],
+ "kidney": [
+  "A05.810.453"
+ ],
+ "kidney transplant; complications": [],
+ "left ventricular function assessed (lvef) by cmr.": [],
+ "life style": [
+  "F01.829.458"
+ ],
+ "lipid testing": [],
+ "liraglutide": [
+  "D06.472.317.680.500.500.500"
+ ],
+ "low intensity exercise": [],
+ "mailed patient outreach intervention": [],
+ "male": [
+  "X999998"
+ ],
+ "mass screening": [
+  "E01.370.500",
+  "E05.318.308.980.438.580",
+  "N02.421.726.233.443",
+  "N05.715.360.300.800.438.500",
+  "N06.850.520.308.980.438.580",
+  "N06.850.780.500"
+ ],
+ "matching placebo": [],
+ "metabolic syndrome": [
+  "C18.452.394.968.500.570",
+  "C18.452.625"
+ ],
+ "metabolism": [
+  "Y08.040"
+ ],
+ "metformin": [
+  "D02.078.370.141.450"
+ ],
+ "metformin xr": [],
+ "methods": [
+  "Y33"
+ ],
+ "microvessels": [
+  "A07.015.461"
+ ],
+ "middle aged": [
+  "M01.060.116.630"
+ ],
+ "mineralocorticoid receptor antagonists": [
+  "D000451"
+ ],
+ "mitral regurgitation functional": [],
+ "mitral valve teer": [],
+ "mortality": [
+  "Y09.010.020"
+ ],
+ "myocardial infarction": [
+  "C14.280.647.500",
+  "C14.907.585.500",
+  "C23.550.513.355.750",
+  "C23.550.717.489.750"
+ ],
+ "naphthyridines": [
+  "D03.633.100.612"
+ ],
+ "natriuretic peptide, brain": [
+  "D06.472.699.584.625",
+  "D12.644.548.585.625",
+  "D12.776.631.590"
+ ],
+ "neprilysin": [
+  "D08.811.277.656.300.480.600",
+  "D08.811.277.656.675.374.600",
+  "D23.050.285.550",
+  "D23.101.140.500"
+ ],
+ "non st elevation myocardial infarction": [
+  "C14.280.647.500.469",
+  "C14.907.585.500.656",
+  "C23.550.513.355.750.469",
+  "C23.550.717.489.750.469"
+ ],
+ "number of participants with diabetes.": [],
+ "number of participants with total cancer except non-melanoma skin cancer": [],
+ "older_adult": [
+  "M01.060.116.100"
+ ],
+ "pathological conditions, anatomical": [
+  "C23.300"
+ ],
+ "patient outcome assessment": [
+  "N04.761.559.590.399",
+  "N05.715.360.575.575.399"
+ ],
+ "peptide fragments": [
+  "D12.644.541"
+ ],
+ "percent change in mean low-density lipoproteins (ldl-c)": [],
+ "percentage of participants who adhered to the medication plan": [],
+ "pharmacology": [
+  "Y07"
+ ],
+ "physiology": [
+  "Y08"
+ ],
+ "physiopathology": [
+  "Y08.050"
+ ],
+ "pioglitazone": [
+  "D02.886.675.933.250",
+  "D03.383.129.708.933.250"
+ ],
+ "placebo": [
+  "D26.660",
+  "E02.785"
+ ],
+ "placebo of dapagliflozin": [],
+ "placebo of iron carboxymaltose": [],
+ "placebos": [
+  "D26.660",
+  "E02.785"
+ ],
+ "plaque, atherosclerotic": [
+  "C23.300.823"
+ ],
+ "post-operative acute kidney injury": [],
+ "pravastatin": [
+  "D02.455.426.559.847.638.930",
+  "D04.615.638.930"
+ ],
+ "prediabetes": [
+  "C18.452.394.750.774",
+  "C19.246.774"
+ ],
+ "prediabetic state": [
+  "C18.452.394.750.774",
+  "C19.246.774"
+ ],
+ "prevalence of aggregate microvascular complication": [],
+ "prevention & control": [
+  "Y11.040"
+ ],
+ "preventive health services": [
+  "N02.421.726"
+ ],
+ "primary hypercholesterolemia": [],
+ "primary prevention": [
+  "N02.421.726.758",
+  "N06.850.780.680"
+ ],
+ "primary prevention of cardiovascular disease": [],
+ "pro-brain natriuretic peptide (1-76)": [],
+ "proof of concept primary activity endpoint - efficacy endpoint": [],
+ "proportional hazards models": [
+  "E05.318.740.500.700",
+  "E05.318.740.600.700",
+  "E05.318.740.750.725",
+  "E05.318.740.998.825",
+  "E05.599.835.900",
+  "N05.715.360.750.530.650",
+  "N05.715.360.750.625.650",
+  "N05.715.360.750.695.650",
+  "N05.715.360.750.795.825",
+  "N06.850.520.830.500.700",
+  "N06.850.520.830.600.700",
+  "N06.850.520.830.750.725",
+  "N06.850.520.830.998.912"
+ ],
+ "psychology": [
+  "Y37"
+ ],
+ "quality of life": [
+  "I01.800",
+  "K01.752.400.750",
+  "N06.850.505.400.425.837"
+ ],
+ "randomized controlled trials as topic": [
+  "E05.318.372.250.250.365.500",
+  "N05.715.360.330.250.250.365.500",
+  "N06.850.520.450.250.250.365.500"
+ ],
+ "reduced ejection fraction": [],
+ "reduction in total cho and ldh": [],
+ "renal insufficiency": [
+  "C12.050.351.968.419.780",
+  "C12.200.777.419.780",
+  "C12.950.419.780"
+ ],
+ "renal insufficiency, chronic": [
+  "C12.050.351.968.419.780.750",
+  "C12.200.777.419.780.750",
+  "C12.950.419.780.750",
+  "C23.550.291.500.906"
+ ],
+ "retinal degeneration": [
+  "C11.270.612",
+  "C11.768.585"
+ ],
+ "retinal diseases": [
+  "C11.768"
+ ],
+ "risk assessment": [
+  "E05.318.740.600.800.715",
+  "N04.452.871.715",
+  "N05.715.360.750.625.700.690",
+  "N06.850.505.715",
+  "N06.850.520.830.600.800.715"
+ ],
+ "risk factors": [
+  "E05.318.740.600.800.725",
+  "N05.715.350.200.700",
+  "N05.715.360.750.625.700.700",
+  "N06.850.490.625.750",
+  "N06.850.520.830.600.800.725"
+ ],
+ "rosuvastatin": [
+  "D02.065.884.650",
+  "D02.455.526.510.432.500",
+  "D02.886.590.700.650",
+  "D03.383.742.775"
+ ],
+ "secondary prevention": [
+  "E02.897",
+  "N02.421.726.825",
+  "N06.850.780.750"
+ ],
+ "self-guided multidomain lifestyle intervention": [],
+ "sitagliptin phosphate": [
+  "D03.383.129.799.725",
+  "D03.383.679.875"
+ ],
+ "slc5a2 protein, human": [],
+ "sodium": [
+  "D01.268.549.750",
+  "D01.268.557.650",
+  "D01.552.528.850",
+  "D01.552.547.725"
+ ],
+ "sodium potassium chloride symporter inhibitors": [
+  "D049994"
+ ],
+ "sodium-glucose transporter 2": [
+  "D12.776.157.530.450.625.437.750",
+  "D12.776.157.530.500.750.750",
+  "D12.776.157.530.937.700",
+  "D12.776.543.585.450.625.562.750",
+  "D12.776.543.585.500.750.750",
+  "D12.776.543.585.937.825"
+ ],
+ "sodium-glucose transporter 2 inhibitors": [
+  "D000077203"
+ ],
+ "st elevation myocardial infarction": [
+  "C14.280.647.500.875",
+  "C14.907.585.500.875",
+  "C23.550.513.355.750.875",
+  "C23.550.717.489.750.875"
+ ],
+ "standard neoadjuvant cht": [],
+ "statin": [
+  "D019161"
+ ],
+ "statistics & numerical data": [
+  "Y09"
+ ],
+ "stroke": [
+  "C10.228.140.300.775",
+  "C14.907.253.855"
+ ],
+ "stroke volume": [
+  "E01.370.370.380.150.700",
+  "G09.330.380.124.882"
+ ],
+ "sulfonylurea compounds": [
+  "D02.065.950.828",
+  "D02.886.590.795"
+ ],
+ "surgery": [
+  "Y11.070"
+ ],
+ "surveys and questionnaires": [
+  "E05.318.308.980",
+  "N05.715.360.300.800",
+  "N06.850.520.308.980"
+ ],
+ "survival": [
+  "Y09.010.020"
+ ],
+ "symporters": [
+  "D12.776.157.530.450.625",
+  "D12.776.543.585.450.625"
+ ],
+ "the proportion of responded patients": [],
+ "therapeutic use": [
+  "Y10"
+ ],
+ "time to major cv event": [],
+ "trastuzumab": [
+  "D12.776.124.486.485.114.224.060.875",
+  "D12.776.124.790.651.114.224.060.875",
+  "D12.776.377.715.548.114.224.200.875"
+ ],
+ "treatment outcome": [
+  "E01.789.800",
+  "N04.761.559.590.800",
+  "N05.715.360.575.575.800"
+ ],
+ "trends": [
+  "Y06.060"
+ ],
+ "triglyceride change from baseline": [],
+ "triple negative breast cancer": [
+  "C04.588.180.788",
+  "C17.800.090.500.788"
+ ],
+ "type 2 diabetes": [
+  "C18.452.394.750.149",
+  "C19.246.300"
+ ],
+ "united states": [
+  "Z01.107.567.875"
+ ],
+ "usual care": [],
+ "utilization of guideline-directed medical therapy in adults with ascvd": [],
+ "vascular diseases": [
+  "C14.907"
+ ],
+ "ventricular function, left": [
+  "G09.330.955.800"
+ ],
+ "zoledronate": [
+  "D02.705.429.500.942",
+  "D03.383.129.308.990"
+ ]
+}

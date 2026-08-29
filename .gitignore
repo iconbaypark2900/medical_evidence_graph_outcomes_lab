@@ -147,7 +147,11 @@ dmypy.json
 .idea/
 
 # Data and logs
-data/
+data/*
+# The MeSH tree cache ships with the repository: without it ingestion
+# cannot classify descriptors offline and every one lands as unknown.
+# Rebuild with `python -m src.mesh`.
+!data/mesh_tree_cache.json
 logs/
 *.log
 
@@ -164,6 +168,9 @@ experiments/
 
 # Configuration files that may contain sensitive data
 config/local_settings.json
-config/secrets.json.ingest_state.json
+config/secrets.json
+
+# Per-machine incremental-ingest watermark.
+.ingest_state.json
 .model_store/
 .audit/
