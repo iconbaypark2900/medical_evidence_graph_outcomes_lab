@@ -29,7 +29,11 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_AUDIT_PATH = Path(os.environ.get("MEG_AUDIT_LOG", ".audit/audit.jsonl"))
+# The path when MEG_AUDIT_LOG is unset. Named separately so the config can
+# be checked against it: the resolved constant reflects the environment,
+# which under test is a throwaway directory.
+AUDIT_PATH_DEFAULT = ".audit/audit.jsonl"
+DEFAULT_AUDIT_PATH = Path(os.environ.get("MEG_AUDIT_LOG", AUDIT_PATH_DEFAULT))
 
 # Size at which the active file is rotated, and how many rotations to keep.
 #

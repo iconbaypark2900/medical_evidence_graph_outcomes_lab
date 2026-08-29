@@ -14,7 +14,7 @@ This directory (`.spark-flow/`) is **Liaison local memory**. It is gitignored an
 ## Reporter flow
 
 ```bash
-cd /home/iconbaypark2900/dataScience/medical_evidence_graph_outcomes_lab
+cd /home/iconbaypark2900/medical_evidence_graph_outcomes_lab
 liaison init <task-id> "<one focused goal>"
 liaison snapshot --show
 # Hermes (or specialist) does the work

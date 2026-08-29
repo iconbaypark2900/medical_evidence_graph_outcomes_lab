@@ -6,6 +6,12 @@
 .venv/bin/python -m pytest -m known_defect   # proven-but-unfixed bugs (currently none)
 ```
 
+`conftest.py` points `MEG_MODEL_STORE` and `MEG_AUDIT_LOG` at a
+throwaway directory before the application is imported, so no test reads
+the developer's real trained models or audit log. A test that passes
+because a model happens to be trained on this machine is testing the
+machine.
+
 Most tests here touch nothing external. The exceptions are marked
 `requires_stack` and need `docker compose up -d` (Neo4j, OpenSearch,
 Qdrant); they **skip** with an explanatory message when those are not

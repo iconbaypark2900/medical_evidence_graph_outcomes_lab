@@ -33,7 +33,7 @@ This document details the first phase implementation of the Medical Evidence Gra
 
 ### 1. Start the Database Infrastructure
 ```bash
-cd /home/roc/dataScience/medical_evidence_graph_outcomes_lab
+cd /home/iconbaypark2900/medical_evidence_graph_outcomes_lab
 docker-compose up -d
 ```
 

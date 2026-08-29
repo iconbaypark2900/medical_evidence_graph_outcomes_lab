@@ -1,23 +1,23 @@
 # Project phase record
 
-- Project: `/home/iconbaypark2900/dataScience/medical_evidence_graph_outcomes_lab`
+- Project: `/home/iconbaypark2900/medical_evidence_graph_outcomes_lab`
 - Registered in: `~/spark/agent-system/registry/repos.yaml`
 - Lifecycle status: classified
-- Current project phase: Prototype
-- Phase id: `prototype`
-- Updated: 2026-05-30T23:25:56
+- Current project phase: Working system
+- Phase id: `working`
+- Updated: 2026-08-29
 - Validation: optional
 - Debrief required: false
 
 ## Phase goal
 
-Fast init, snapshot, narrow closeout; record what is stubbed.
+Keep every claim checkable. Nothing reports a value it did not compute.
 
 ## Exit criteria (from phase_routing.yaml)
 
-- [ ] Happy path runs locally on this Spark
-- [ ] Non-goals listed in project brief or current_state
-- [ ] No hidden manual steps for the demo path
+- [x] Happy path runs locally on this Spark — `.venv/bin/python -m pytest`, 576 tests
+- [x] Non-goals listed in project brief or current_state
+- [x] No hidden manual steps for the demo path — `start_system.py` brings up both services
 
 ## Next slice
 

@@ -156,7 +156,12 @@ def test_the_shipped_config_is_truthful():
     import json
     from pathlib import Path
 
-    from src.api_backend import phi_scanner
+    import src.api_backend as backend
+
+    # configure() is what a running app does at startup; the module-level
+    # scanner is deliberately inert until then.
+    backend.configure()
+    phi_scanner = backend.phi_scanner
 
     config = json.loads(Path("config/settings.json").read_text())
     assert "presidio" not in config["security"], (

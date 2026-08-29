@@ -1,8 +1,8 @@
 # Current state
 
-- Project: `/home/iconbaypark2900/dataScience/medical_evidence_graph_outcomes_lab`
-- Updated: 2026-05-31T00:58:53
-- Project phase: Prototype (`prototype`)
+- Project: `/home/iconbaypark2900/medical_evidence_graph_outcomes_lab`
+- Updated: 2026-08-29
+- Project phase: Working system (`working`)
 - After task: medical-evidence-graph-outcomes-lab-l3-exec-001
 
 ## Latest debrief
@@ -11,7 +11,9 @@
 
 ## Next recommended action
 
-- Run `liaison debrief --show` to generate ranked options.
+- Expand the corpus. Every retrieval and embedding metric is currently
+  measured on 48 documents, which is the binding constraint on whether
+  they mean anything.
 
 ## Built (closed slices)
 
@@ -24,7 +26,6 @@
 ## Repo git status
 
 ```text
-?? .spark-flow/
-?? docs/
+clean; 26 commits on main, CI green
 ```
 

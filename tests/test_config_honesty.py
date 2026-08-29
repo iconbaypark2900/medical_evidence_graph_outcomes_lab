@@ -90,15 +90,20 @@ def test_prometheus_is_claimed_and_implemented():
 
 
 def test_mlflow_is_claimed_off_and_is_off():
-    from src.api_backend import experiment_tracker
+    import src.api_backend as backend
+
+    backend.configure()
 
     assert CONFIG["observability"]["mlflow"]["enabled"] is False
-    assert experiment_tracker.enabled is False
+    assert backend.experiment_tracker.enabled is False
     assert source_mentions("mlflow"), "the key is kept, so code must read it"
 
 
 def test_phi_settings_match_the_running_scanner():
-    from src.api_backend import phi_scanner
+    import src.api_backend as backend
+
+    backend.configure()
+    phi_scanner = backend.phi_scanner
 
     declared = CONFIG["security"]["phi"]
     assert phi_scanner.enabled == declared["enabled"]
@@ -107,9 +112,15 @@ def test_phi_settings_match_the_running_scanner():
 
 
 def test_the_audit_path_is_the_one_actually_written():
-    from src.audit import DEFAULT_AUDIT_PATH
+    """Compared against the unset-environment default.
 
-    assert CONFIG["observability"]["audit"]["path"] == str(DEFAULT_AUDIT_PATH)
+    The resolved constant follows MEG_AUDIT_LOG, which the test suite
+    points at a throwaway directory so no test reads the developer's real
+    audit log.
+    """
+    from src.audit import AUDIT_PATH_DEFAULT
+
+    assert CONFIG["observability"]["audit"]["path"] == AUDIT_PATH_DEFAULT
 
 
 def test_every_configured_service_is_reachable_in_code():

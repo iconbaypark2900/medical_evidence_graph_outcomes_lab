@@ -25,8 +25,15 @@ from src.api_backend import (
 
 
 @pytest.fixture(scope="module")
-def client() -> TestClient:
-    return TestClient(app)
+def client():
+    """As a context manager, so the app's startup runs.
+
+    Loading config and persisted state is the lifespan's job now, not the
+    import's. A bare TestClient gives an unconfigured app, which is
+    exactly what some tests want and this one does not.
+    """
+    with TestClient(app) as test_client:
+        yield test_client
 
 
 @pytest.fixture(autouse=True)

@@ -1,26 +1,26 @@
 # Project assessment
 
-- Project: `/home/iconbaypark2900/dataScience/medical_evidence_graph_outcomes_lab`
-- Assessed: 2026-05-30T23:25:56
+- Project: `/home/iconbaypark2900/medical_evidence_graph_outcomes_lab`
+- Assessed: 2026-08-29
 - Recommended phase: prototype
 - Default profile: python
 
 ## Evidence
 
 - README present: yes
-- Tests present: no
+- Tests present: yes (576)
 - Build/test commands detected: yes
-- Python project (pyproject.toml): no
+- Python project (pyproject.toml): yes
 - Node project (package.json): no
 - Makefile: no
-- CI config: no
+- CI config: yes (.github/workflows/ci.yml)
 - Deploy/rollback documented: yes
 - Validation profile registered: yes
 - Prior liaison closeouts: no
 
 ## Recommendation rationale
 
-Minimal automated-quality signals — prove one happy path first.
+Reassessed 2026-08-29: the signals that were missing are present.
 
 ## Next step
 

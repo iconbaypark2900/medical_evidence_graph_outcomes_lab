@@ -1,30 +1,43 @@
 # LIAISON PROJECT BRIEF — medical_evidence_graph_outcomes_lab
 
-> Machine: DGX Spark | Org: dataScience | Phase: prototype
-> Path: `/home/iconbaypark2900/dataScience/medical_evidence_graph_outcomes_lab`
-> Last updated: 2026-05-30
+> Machine: DGX Spark | Org: dataScience | Phase: working system
+> Path: `/home/iconbaypark2900/medical_evidence_graph_outcomes_lab`
+> Last updated: 2026-08-29
 
 ---
 
 ## Problem statement
 
-Evidence-based medicine platform combining medical knowledge graphs, analytics, and AI for clinical decision support.
+Evidence-based medicine platform: retrieval over indexed medical
+literature, outcomes and cohort analytics, and guideline adherence, with
+a knowledge graph joining them.
 
 ---
 
 ## Happy path
 
 ```bash
-cd /home/iconbaypark2900/dataScience/medical_evidence_graph_outcomes_lab
-cd ~/dataScience/medical_evidence_graph_outcomes_lab && python -m pytest 2>/dev/null || liaison doctor
+python3 -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+.venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
+.venv/bin/python -m pytest
+```
+
+576 tests. 13 of them need `docker compose up -d` (Neo4j, OpenSearch,
+Qdrant) and skip with a message when it is not running.
+
+```bash
+.venv/bin/python start_system.py     # API + frontend, loopback only
 ```
 
 ---
 
 ## Non-goals
 
-- Real patient EHR records
-- HIPAA-certified deployment
+- Real patient EHR records. Free-text fields are screened for direct
+  identifiers and a payload carrying them is rejected.
+- HIPAA-certified deployment. Authentication is a shared API key; there
+  is no per-role or per-dataset authorization.
 
 ---
 
@@ -33,18 +46,25 @@ cd ~/dataScience/medical_evidence_graph_outcomes_lab && python -m pytest 2>/dev/
 | Field | Value |
 |-------|-------|
 | Profile | `python` |
-| Command | `cd ~/dataScience/medical_evidence_graph_outcomes_lab && python -m pytest 2>/dev/null || liaison doctor` |
+| Command | `cd /home/iconbaypark2900/medical_evidence_graph_outcomes_lab && .venv/bin/python -m pytest` |
+| CI | GitHub Actions: unit matrix on 3.11/3.13, plus an integration job that brings up docker-compose |
 
 ---
 
-## Hub pattern and recommended agents
+## Current state
 
-| Agent | Role |
-|-------|------|
-| hermes | Agent execution |
-| ml-intern | Agent execution |
+Working and tested: evidence ingestion (PubMed, ClinicalTrials.gov,
+incremental), storage into Neo4j/OpenSearch/Qdrant, hybrid graph-RAG
+retrieval, survival and causal analytics, risk models with held-out
+metrics, guideline adherence, knowledge graph embeddings evaluated
+against baselines, PHI screening, audit trail, Prometheus metrics.
 
-Pattern: `python-cli`
+Not implemented, and the config says so rather than implying otherwise:
+OIDC, Open Policy Agent, Vault, Langfuse.
+
+The corpus is small — 48 documents, ~460 triples — which is the binding
+constraint on whether the retrieval and embedding numbers mean much.
+Expand with `python -m src.integration --term "..." --incremental`.
 
 ---
 
@@ -52,36 +72,20 @@ Pattern: `python-cli`
 
 | Risk | Mitigation |
 |------|------------|
-| biomedical | See next_actions in project_profile.yaml |
-| no-real-patient-data | See next_actions in project_profile.yaml |
-| evidence-provenance | See next_actions in project_profile.yaml |
+| biomedical | Public literature only; no PHI accepted, and screening rejects payloads carrying direct identifiers |
+| no-real-patient-data | Enforced at the API boundary, not just documented |
+| evidence-provenance | Every retrieval result carries its citation and the retrieval mode that produced it |
 
 ---
 
 ## Next actions
 
-- Add test suite and pyproject.toml
-- Confirm only synthetic/public evidence datasets in repo
+- Expand the corpus; every retrieval and embedding metric is measured on 48 documents.
+- Real authentication if this is to be reachable by anyone else.
 
 ---
 
 ## Related
 
-- [project_profile.yaml](/home/iconbaypark2900/dataScience/medical_evidence_graph_outcomes_lab/.spark-flow/project_profile.yaml)
-- [.spark-flow/README.md](/home/iconbaypark2900/dataScience/medical_evidence_graph_outcomes_lab/.spark-flow/README.md)
-
----
-
-## L4 Domain Risk Review — Biomedical (2026-05-31)
-
-**Review scope:** biomedical domain — no real patient data, synthetic sample verification, provenance
-
-| Control | Status | Evidence |
-|---------|--------|----------|
-| No real patient data in git | PASS | Evidence graph uses published literature references, not PHI |
-| Graph database contains research data only | PASS | Outcomes data sourced from public datasets |
-| Provenance documented | INFO | Graph node sources should be cited |
-
-**Risk classification:** LOW — evidence synthesis from published literature; no PHI.
-
-**Decision:** Accept current risk posture.
+- [README.md](/home/iconbaypark2900/medical_evidence_graph_outcomes_lab/README.md) — setup, endpoints, and what is and is not implemented
+- [tests/README.md](/home/iconbaypark2900/medical_evidence_graph_outcomes_lab/tests/README.md) — what the suite covers and why

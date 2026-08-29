@@ -8,6 +8,21 @@ recover the parameters they were given.
 """
 from __future__ import annotations
 
+import os
+import tempfile
+
+# Point persistent state at a throwaway directory before anything imports
+# src.api_backend, whose module constants read these at import time.
+#
+# Without this the suite reads the developer's real .model_store/ and
+# .audit/ -- a test that passes because a model happens to be trained on
+# this machine is testing the machine. Set here rather than in a fixture
+# because conftest is imported before the test modules that import the
+# application.
+_TEST_STATE = tempfile.mkdtemp(prefix="meg-test-state-")
+os.environ.setdefault("MEG_MODEL_STORE", os.path.join(_TEST_STATE, "models"))
+os.environ.setdefault("MEG_AUDIT_LOG", os.path.join(_TEST_STATE, "audit.jsonl"))
+
 import numpy as np
 import pandas as pd
 import pytest

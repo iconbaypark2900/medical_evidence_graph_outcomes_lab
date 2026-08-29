@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 
 import os
 import secrets
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Depends, Query, Security
 from fastapi.security import APIKeyHeader
@@ -44,8 +45,13 @@ from sklearn.model_selection import train_test_split
 
 from src.data_ingestion import ClinicalTrialsFetcher, PubMedFetcher
 from src.audit import AuditLog, actor_id
-from src.observability import Metrics, RequestTimer, tracker_from_config
-from src.phi import PHIDetected, scanner_from_config
+from src.observability import (
+    ExperimentTracker,
+    Metrics,
+    RequestTimer,
+    tracker_from_config,
+)
+from src.phi import PHIDetected, PHIScanner, scanner_from_config
 from src.outcomes_analytics_service.main import (
     CohortDefinition,
     CohortError,
@@ -71,7 +77,49 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load configuration and persisted state when the app starts serving.
+
+    Not at import. A module that restores models and registers guidelines
+    merely by being imported makes every consumer inherit whatever is on
+    the machine's disk, which is how a test passes here and fails
+    elsewhere. Tests that want the loaded state use the TestClient as a
+    context manager; tests that want a clean one simply do not.
+    """
+    configure()
+    yield
+
+
+def configure(config_path: str = "config/settings.json") -> Dict[str, Any]:
+    """Read config and restore persisted state. Idempotent."""
+    global API_KEYS, ALLOWED_ORIGINS, phi_scanner, experiment_tracker
+
+    API_KEYS = load_api_keys(config_path)
+    ALLOWED_ORIGINS = load_allowed_origins(config_path)
+    phi_scanner = load_phi_scanner(config_path)
+    experiment_tracker = load_tracker(config_path)
+
+    if not API_KEYS:
+        logger.warning(
+            "No API keys configured: every endpoint is open to anyone who can "
+            "reach this port. Set MEG_API_KEYS or security.api_keys before "
+            "exposing this beyond localhost.")
+    logger.info(
+        f"PHI detection: {phi_scanner.backend}, on detection "
+        f"{phi_scanner.on_detection}" if phi_scanner.enabled
+        else "PHI detection is off. Send de-identified or synthetic data only.")
+
+    models_restored = risk_model_registry.load()
+    metrics.observe_risk_model(risk_model_registry.models)
+    guidelines_restored = restore_guidelines()
+
+    return {"api_keys": len(API_KEYS), "risk_models": models_restored,
+            "guidelines": guidelines_restored}
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Medical Evidence Graph & Outcomes Insight Lab API",
     description="API for clinical decision support and evidence-based medicine",
     version="2.0.0"
@@ -121,8 +169,21 @@ def load_allowed_origins(config_path: str = "config/settings.json") -> List[str]
     return configured or ["http://localhost:8501", "http://127.0.0.1:8501"]
 
 
-API_KEYS = load_api_keys()
-ALLOWED_ORIGINS = load_allowed_origins()
+# Populated by the lifespan below, not at import.
+#
+# Importing this module used to restore a trained risk model from disk,
+# re-register persisted guidelines (printing as it went), and read the
+# config four times. Six test files import it, so every one of them
+# inherited whatever happened to be in .model_store/ and .audit/ on the
+# machine running them -- the same ambient-state dependence that made a
+# Neo4j test pass here and fail in CI, but structural rather than one
+# test's mistake.
+#
+# It was never a speed problem: the 3.4 second import is torch and
+# scikit-learn, and the file reads it does are hundredths of a second.
+# What it was is state nobody asked for.
+API_KEYS: set = set()
+ALLOWED_ORIGINS: List[str] = load_allowed_origins()
 
 
 def load_phi_scanner(config_path: str = "config/settings.json"):
@@ -139,7 +200,7 @@ def load_phi_scanner(config_path: str = "config/settings.json"):
     return scanner_from_config(config)
 
 
-phi_scanner = load_phi_scanner()
+phi_scanner = PHIScanner()   # disabled until configure() runs
 audit_log = AuditLog()
 metrics = Metrics()
 
@@ -152,7 +213,7 @@ def load_tracker(config_path: str = "config/settings.json"):
     return tracker_from_config(config)
 
 
-experiment_tracker = load_tracker()
+experiment_tracker = ExperimentTracker()  # disabled until configure() runs
 
 if phi_scanner.enabled:
     logger.info(f"PHI detection: {phi_scanner.backend}, "
@@ -160,12 +221,6 @@ if phi_scanner.enabled:
 else:
     logger.info(
         "PHI detection is off. Send de-identified or synthetic data only.")
-
-if not API_KEYS:
-    logger.warning(
-        "No API keys configured: every endpoint is open to anyone who can "
-        "reach this port. Set MEG_API_KEYS or security.api_keys before "
-        "exposing this beyond localhost.")
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
@@ -627,9 +682,6 @@ class RiskModelRegistry:
 
 risk_model_registry = RiskModelRegistry()
 risk_model_registry.__init_store__()
-risk_model_registry.load()
-
-metrics.observe_risk_model(risk_model_registry.models)
 
 outcomes_service = OutcomesAnalyticsService()
 pathway_service = PathwayGuidelineService()
@@ -674,7 +726,7 @@ def restore_guidelines() -> int:
     return len(restored)
 
 
-restore_guidelines()
+
 survival_models = SurvivalAnalysisModels()
 causal_models = CausalInferenceModels()
 feature_builder = EnhancedOutcomeModels()

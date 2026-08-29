@@ -1,6 +1,6 @@
 # Project brief
 
-Repo: `/home/iconbaypark2900/dataScience/medical_evidence_graph_outcomes_lab`
+Repo: `/home/iconbaypark2900/medical_evidence_graph_outcomes_lab`
 
 ## Purpose
 
