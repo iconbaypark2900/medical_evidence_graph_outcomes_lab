@@ -317,6 +317,79 @@ def kge_scorer(model: nn.Module, store: TripleStore):
     return score
 
 
+def save_model(path, model: nn.Module, store: TripleStore, report: "KGEReport",
+               edge_count: int) -> None:
+    """Persist a trained model with everything needed to trust it later.
+
+    The vocabulary travels with the weights because entity indices are
+    positional: a state dict alone is a matrix of numbers whose rows mean
+    whatever the graph meant at training time. The edge count travels with
+    it so a graph that has since changed can be detected rather than
+    silently scored against stale indices.
+    """
+    from pathlib import Path as _Path
+
+    path = _Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({
+        "model_class": type(model).__name__.lower(),
+        "dim": model.dim,
+        "state_dict": model.state_dict(),
+        "entities": store.entities,
+        "relations": store.relations,
+        "edge_count": edge_count,
+        "report": report.describe(),
+        "mrr": report.evaluation.mrr,
+    }, path)
+    logger.info(f"Saved embeddings to {path}")
+
+
+def load_model(path, edge_count: Optional[int] = None):
+    """Restore a model, refusing one trained on a different graph.
+
+    Returns (model, store, saved_report) or None. A model whose training
+    graph had a different number of edges is refused rather than loaded:
+    its entity indices no longer point at the same entities, so it would
+    score confidently about the wrong things.
+    """
+    from pathlib import Path as _Path
+
+    path = _Path(path)
+    if not path.exists():
+        return None
+
+    try:
+        state = torch.load(path, weights_only=False)
+    except Exception as e:
+        logger.error(f"Could not read embeddings from {path}: {e}")
+        return None
+
+    if edge_count is not None and state["edge_count"] != edge_count:
+        logger.warning(
+            f"Saved embeddings were trained on a graph with "
+            f"{state['edge_count']} edges; this graph has {edge_count}. "
+            f"Refusing to load: entity indices no longer line up. Retrain.")
+        return None
+
+    model_class = MODELS[state["model_class"]]
+    model = model_class(len(state["entities"]), len(state["relations"]),
+                        state["dim"])
+    model.load_state_dict(state["state_dict"])
+    model.eval()
+
+    store = TripleStore.__new__(TripleStore)
+    store.triples = []
+    store.entities = state["entities"]
+    store.relations = state["relations"]
+    store.entity_index = {e: i for i, e in enumerate(store.entities)}
+    store.relation_index = {r: i for i, r in enumerate(store.relations)}
+
+    logger.info(
+        f"Restored embeddings from {path} "
+        f"({state['model_class']}, MRR {state['mrr']:.4f})")
+    return model, store, state["report"]
+
+
 async def load_triples_from_neo4j(config_path: str = "config/settings.json") -> List[Triple]:
     """Read the evidence graph as triples."""
     import neo4j

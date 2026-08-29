@@ -500,3 +500,45 @@ async def test_the_service_reads_the_graph_the_pipeline_populates(require_stack)
                 "MATCH (n) WHERE n.id = 'unifytest_1' OR n.name = 'unifytest drug' "
                 "DETACH DELETE n")
         await driver.close()
+
+
+def test_the_service_restores_a_persisted_model(tmp_path):
+    """A restart must not read as never-trained."""
+    service = EvidenceGraphService()
+    service.kge_store_path = tmp_path / "embeddings.pt"
+    load_triples_into(service, learnable_triples())
+    report = service.recompute_kge_features(epochs=200, dim=32)
+    if getattr(service, "kge_model", None) is None:
+        pytest.skip("model did not beat baselines on this seed")
+
+    restarted = EvidenceGraphService()
+    restarted.kge_store_path = service.kge_store_path
+    load_triples_into(restarted, learnable_triples())
+
+    assert restarted.restore_embeddings() is True
+    assert restarted.kge_report.evaluation.mrr == pytest.approx(
+        report.evaluation.mrr, abs=1e-6)
+    assert restarted.kge_suggestions("doc_0", "HAS_CONDITION", limit=2)
+
+
+def test_a_service_with_no_store_path_persists_nothing(tmp_path):
+    service = EvidenceGraphService()
+    load_triples_into(service, learnable_triples())
+    service.recompute_kge_features(epochs=10, dim=8)
+
+    assert service.restore_embeddings() is False
+
+
+def test_a_persisted_model_is_refused_when_the_graph_changed(tmp_path):
+    service = EvidenceGraphService()
+    service.kge_store_path = tmp_path / "embeddings.pt"
+    load_triples_into(service, learnable_triples())
+    service.recompute_kge_features(epochs=200, dim=32)
+    if getattr(service, "kge_model", None) is None:
+        pytest.skip("model did not beat baselines on this seed")
+
+    changed = EvidenceGraphService()
+    changed.kge_store_path = service.kge_store_path
+    load_triples_into(changed, learnable_triples(n_docs=60))
+
+    assert changed.restore_embeddings() is False

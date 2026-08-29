@@ -154,3 +154,87 @@ def test_every_page_has_a_caption():
 
     missing = [name for name in frontend.PAGES if not frontend.PAGE_CAPTIONS.get(name)]
     assert missing == [], f"pages with no sidebar caption: {missing}"
+
+
+# --------------------------------------------------------------------------
+# The other end of the chain
+#
+# The test above walks endpoints and checks each has a UI. It cannot see a
+# capability that never got an endpoint -- which is how the graph service
+# and its embeddings sat unreachable while a guard for exactly this
+# defect was passing. This walks the service classes instead.
+# --------------------------------------------------------------------------
+
+API_SOURCE = Path("src/api_backend.py").read_text()
+
+SERVICE_CLASSES = [
+    ("src.evidence_graph_service.main", "EvidenceGraphService"),
+    ("src.outcomes_analytics_service.main", "OutcomesAnalyticsService"),
+    ("src.pathway_guideline_service.main", "PathwayGuidelineService"),
+    ("src.evidence_ingestion_service.main", "EvidenceIngestionService"),
+]
+
+# Methods deliberately not exposed, each with the reason. Adding a name
+# here is a decision; leaving a capability unreachable silently is not.
+INTERNAL_METHODS = {
+    # Graph construction, driven by ingestion rather than by a caller.
+    "add_node", "add_edge", "extract_entities_relations",
+    "upsert_graph_nodes_edges",
+    # Reached through the endpoints that build cohorts.
+    "load_cohort_definition", "extract_population_data",
+    "store_and_return_metrics", "run_subgroup_analysis",
+    # Ingestion runs on a schedule via the CLI, not over HTTP.
+    "define_sources", "fetch_sources", "parse_normalize", "map_ontologies",
+    "store_metadata", "emit_evidence_ingested", "enrich_entities", "run",
+    # Rendering helpers rather than analyses.
+    "generate_pathway_visualization", "describe_graph",
+}
+
+
+def public_methods(module_name: str, class_name: str) -> set:
+    import importlib
+
+    cls = getattr(importlib.import_module(module_name), class_name)
+    return {
+        name for name in dir(cls)
+        if not name.startswith("_") and callable(getattr(cls, name))
+    }
+
+
+@pytest.mark.parametrize("module_name,class_name", SERVICE_CLASSES)
+def test_every_service_capability_is_exposed_or_declared_internal(
+    module_name, class_name
+):
+    """A capability with no endpoint is not delivered.
+
+    This is the check that was missing when knowledge graph embeddings
+    shipped reachable only in-process: the endpoint-to-UI guard had
+    nothing to walk, because there was no endpoint.
+    """
+    unreachable = sorted(
+        name for name in public_methods(module_name, class_name)
+        if name not in INTERNAL_METHODS and name not in API_SOURCE
+    )
+
+    assert unreachable == [], (
+        f"{class_name} methods with no endpoint and no declared reason: "
+        f"{unreachable}")
+
+
+def test_the_internal_list_does_not_rot():
+    """A name here that no longer exists hides a real gap behind a stale
+    exemption."""
+    everything = set()
+    for module_name, class_name in SERVICE_CLASSES:
+        everything |= public_methods(module_name, class_name)
+
+    stale = sorted(INTERNAL_METHODS - everything)
+    assert stale == [], f"exemptions for methods that no longer exist: {stale}"
+
+
+def test_the_embeddings_are_reachable():
+    """The specific gap this section was added for."""
+    assert "recompute_kge_features" in API_SOURCE
+    assert "kge_suggestions" in API_SOURCE
+    assert "/api/graph/embeddings/train" in FRONTEND
+    assert "Graph & Embeddings" in FRONTEND

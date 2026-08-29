@@ -1000,9 +1000,119 @@ PAGE_CAPTIONS = {
     "Treatment Effect": "average treatment effect",
     "Guidelines & Adherence": "register and score",
     "Evidence for a Guideline": "evidence per step",
+    "Graph & Embeddings": "link prediction, evaluated",
     "Evidence Search": "search the corpus",
     "Audit Trail": "who ran what",
 }
+
+def page_graph_embeddings():
+    st.header("🕸️ Graph & Embeddings")
+    require_connection()
+
+    status = call_api("GET", "/api/graph")
+    if status is None:
+        return
+
+    graph = status["graph"]
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Graph source", graph["source"])
+    col2.metric("Nodes", graph["nodes"])
+    col3.metric("Edges", graph["edges"])
+    if graph["by_label"]:
+        st.caption(" · ".join(f"{label}: {n}" for label, n in graph["by_label"].items()))
+
+    if st.button("Reload graph from Neo4j"):
+        result = call_api("POST", "/api/graph/reload")
+        if result is not None:
+            st.success(result["note"])
+            st.rerun()
+
+    st.divider()
+    st.subheader("Embeddings")
+
+    embeddings = status["embeddings"]
+    if not embeddings["trained"]:
+        st.info(embeddings["note"])
+    else:
+        model = embeddings["model"]
+        col1, col2, col3 = st.columns(3)
+        col1.metric("MRR", model["mrr"])
+        col2.metric("Hits@1", model["hits_at_1"])
+        col3.metric("Hits@10", model["hits_at_10"])
+
+        # The verdict, not just the number: a model that loses to
+        # "suggest whatever usually appears" is not served, and the
+        # reader should see that rather than a score in isolation.
+        if embeddings["served"]:
+            st.success(
+                f"`{model['model']}` beat every baseline on MRR and is being "
+                f"served.")
+        else:
+            st.warning(
+                f"`{model['model']}` did not beat every baseline, so its "
+                f"suggestions are not served. The structural scorer is used "
+                f"instead.")
+
+        rows = [{"predictor": b["model"], "MRR": b["mrr"],
+                 "Hits@1": b["hits_at_1"], "Hits@10": b["hits_at_10"]}
+                for b in embeddings["baselines"]]
+        rows.insert(0, {"predictor": f"{model['model']} (model)",
+                        "MRR": model["mrr"], "Hits@1": model["hits_at_1"],
+                        "Hits@10": model["hits_at_10"]})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+        if embeddings["loses_to_a_baseline_on"]:
+            st.caption(
+                "Loses to a baseline on: "
+                + ", ".join(embeddings["loses_to_a_baseline_on"])
+                + " — reported rather than averaged away.")
+        st.caption(embeddings["note"])
+
+    with st.form("train_embeddings"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            model_name = st.selectbox("Model", ["distmult", "transe"])
+        with col2:
+            dim = st.number_input("Dimensions", 8, 512, 64, step=8)
+        with col3:
+            epochs = st.number_input("Epochs", 10, 5000, 300, step=50)
+        if st.form_submit_button("Train embeddings"):
+            with st.spinner("Training..."):
+                result = call_api("POST", "/api/graph/embeddings/train", json={
+                    "model": model_name, "dim": int(dim), "epochs": int(epochs)})
+            if result is not None:
+                st.success(
+                    f"Trained. Served: {result['served']}. "
+                    f"MRR {result['model']['mrr']}")
+                st.rerun()
+
+    st.divider()
+    st.subheader("Link suggestions")
+
+    entity = st.text_input("Entity id", "")
+    col1, col2 = st.columns(2)
+    with col1:
+        relation = st.selectbox(
+            "Relation", ["HAS_INTERVENTION", "HAS_CONDITION",
+                         "HAS_OUTCOME", "HAS_POPULATION"])
+    with col2:
+        method = st.selectbox("Predictor", ["auto", "kge", "structural"])
+
+    if entity and st.button("Suggest links"):
+        result = call_api("GET", "/api/graph/suggestions", params={
+            "entity": entity, "relation": relation, "limit": 10, "method": method})
+        if result is None:
+            return
+
+        st.caption(f"Predictor used: **{result['method_used']}**")
+        if not result["suggestions"]:
+            st.info("No suggestions for this entity and relation.")
+            return
+
+        st.dataframe(pd.DataFrame(result["suggestions"]),
+                     hide_index=True, use_container_width=True)
+        st.caption(result["note"])
+
 
 PAGES = {
     "Dashboard": page_dashboard,
@@ -1014,6 +1124,7 @@ PAGES = {
     "Treatment Effect": page_causal_inference,
     "Guidelines & Adherence": page_guidelines,
     "Evidence for a Guideline": page_guideline_evidence,
+    "Graph & Embeddings": page_graph_embeddings,
     "Evidence Search": page_evidence_search,
     "Audit Trail": page_audit,
     "Compare Outcome Rates": page_cohort_analysis,

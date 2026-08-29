@@ -51,6 +51,10 @@ from src.outcomes_analytics_service.main import (
     CohortError,
     OutcomesAnalyticsService,
 )
+from src.evidence_graph_service.main import (
+    RELATION_TARGET_LABEL,
+    EvidenceGraphService,
+)
 from src.pathway_guideline_service.main import (
     ObservedPathway,
     PathwayGuidelineService,
@@ -369,6 +373,13 @@ class AdherenceRequest(BaseModel):
     steps: List[ObservedStep] = Field(default_factory=list)
 
 
+class TrainEmbeddingsRequest(BaseModel):
+    model: str = Field("distmult", description="transe or distmult")
+    dim: int = Field(64, ge=8, le=512)
+    epochs: int = Field(300, ge=10, le=5000)
+    seed: int = Field(0)
+
+
 class TrainRiskModelRequest(BaseModel):
     training_data: List[CohortMember] = Field(..., min_length=20)
     test_size: float = Field(0.25, gt=0.0, lt=1.0)
@@ -622,6 +633,8 @@ metrics.observe_risk_model(risk_model_registry.models)
 
 outcomes_service = OutcomesAnalyticsService()
 pathway_service = PathwayGuidelineService()
+graph_service = EvidenceGraphService()
+graph_service.kge_store_path = MODEL_STORE / "graph_embeddings.pt"
 
 
 class GuidelineStore:
@@ -1661,6 +1674,155 @@ async def guideline_evidence(
             "Retrieval over the indexed corpus. A step with no supporting "
             "records means this corpus does not cover it, which is not a "
             "statement about the literature or about the recommendation."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Evidence graph and embeddings
+#
+# The graph service was reachable only in-process. It is the fourth time a
+# working capability has had no way to invoke it: services with no
+# endpoint, endpoints with no page, and now a whole module with neither.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/graph")
+async def graph_status(_key: Optional[str] = Depends(require_api_key)):
+    """What graph is loaded, and whether embeddings are servable."""
+    report = getattr(graph_service, "kge_report", None)
+    return {
+        "status": "success",
+        "graph": graph_service.describe_graph(),
+        "embeddings_persisted": bool(
+            graph_service.kge_store_path
+            and graph_service.kge_store_path.exists()),
+        "embeddings": (
+            {"trained": False,
+             "note": "No embeddings trained. POST /api/graph/embeddings/train."}
+            if report is None else
+            {"trained": True,
+             "served": getattr(graph_service, "kge_model", None) is not None,
+             **report.describe()}
+        ),
+    }
+
+
+@app.post("/api/graph/reload")
+async def reload_graph(_key: Optional[str] = Depends(require_api_key)):
+    """Load the graph from Neo4j.
+
+    Embeddings are discarded: entity indices are positional, so a model
+    trained on the previous graph no longer refers to the same entities.
+    """
+    try:
+        edges = await graph_service.load_from_neo4j()
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cannot read the graph from Neo4j: {e}") from e
+
+    for attribute in ("kge_model", "kge_store", "kge_report", "kge_edge_count"):
+        if hasattr(graph_service, attribute):
+            delattr(graph_service, attribute)
+
+    # A persisted model may still match the graph just loaded; the edge
+    # count decides, so a reload that changed nothing does not throw away
+    # a model that is still correct.
+    restored = graph_service.restore_embeddings()
+
+    audit_log.record("graph.reload", actor=actor_id(_key), edges=edges,
+                     embeddings_restored=restored)
+    return {
+        "status": "success", "graph": graph_service.describe_graph(),
+        "embeddings_restored": restored,
+        "note": ("Embeddings restored from the store; they match this graph."
+                 if restored else
+                 "No matching embeddings on disk; train against this graph."),
+    }
+
+
+@app.post("/api/graph/embeddings/train")
+async def train_embeddings(request: TrainEmbeddingsRequest,
+                           _key: Optional[str] = Depends(require_api_key)):
+    """Train knowledge graph embeddings and report the evaluation.
+
+    The report is returned whether or not the model is served. A predictor
+    that loses to "suggest whatever usually appears" is complexity without
+    benefit, and `served` says which happened.
+    """
+    if not graph_service.edges:
+        raise HTTPException(
+            status_code=409,
+            detail="No graph is loaded. POST /api/graph/reload first.")
+
+    try:
+        report = graph_service.recompute_kge_features(
+            model_name=request.model, dim=request.dim,
+            epochs=request.epochs, seed=request.seed)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    served = getattr(graph_service, "kge_model", None) is not None
+    metrics.observe_analysis("graph.embeddings_train", len(graph_service.edges))
+    audit_log.record(
+        "graph.embeddings.train", actor=actor_id(_key), model=request.model,
+        epochs=request.epochs, mrr=round(report.evaluation.mrr, 4), served=served)
+
+    return {"status": "success", "served": served, **report.describe()}
+
+
+@app.get("/api/graph/suggestions")
+async def graph_suggestions(
+    entity: str = Query(..., description="Node id to suggest links for"),
+    relation: str = Query("HAS_INTERVENTION"),
+    limit: int = Query(5, ge=1, le=50),
+    method: str = Query("auto", description="auto, kge, or structural"),
+    _key: Optional[str] = Depends(require_api_key),
+):
+    """Suggest links for an entity.
+
+    `auto` uses the embeddings when a trained model beat its baselines and
+    falls back to the structural scorer otherwise, saying which ran. The
+    two are different predictors and the response never blurs them.
+    """
+    if method not in {"auto", "kge", "structural"}:
+        raise HTTPException(
+            status_code=422,
+            detail=f"method must be auto, kge or structural; got {method!r}")
+    if relation not in RELATION_TARGET_LABEL:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown relation {relation!r}; known: "
+                   f"{sorted(RELATION_TARGET_LABEL)}")
+
+    used, suggestions = method, []
+    try:
+        if method in {"auto", "kge"}:
+            try:
+                suggestions = graph_service.kge_suggestions(entity, relation, limit)
+                used = "kge"
+            except RuntimeError:
+                if method == "kge":
+                    raise
+                used = "structural"
+        if used == "structural" or method == "structural":
+            suggestions = graph_service.suggest_related_entities(
+                entity, RELATION_TARGET_LABEL[relation], relation)[:limit]
+            used = "structural"
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
+    audit_log.record("graph.suggestions", actor=actor_id(_key),
+                     relation=relation, method=used, n=len(suggestions))
+    return {
+        "status": "success", "entity": entity, "relation": relation,
+        "method_used": used, "suggestions": suggestions,
+        "note": (
+            "Scores are model or similarity outputs, not probabilities. "
+            "Embedding suggestions carry the model's held-out MRR; "
+            "structural ones carry the shared neighbours behind them."
         ),
     }
 

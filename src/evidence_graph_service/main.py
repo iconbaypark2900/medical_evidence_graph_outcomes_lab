@@ -80,6 +80,45 @@ class EvidenceGraphService:
         self.nodes = {}
         self.edges = {}
         self.graph_source = "empty"
+        # Where a trained model is kept between runs. Training is 300
+        # epochs behind a held-out evaluation; a restart discarding it
+        # silently, and then reporting "no embeddings have been trained",
+        # reads as never-trained rather than trained-and-lost.
+        self.kge_store_path = None
+
+    def restore_embeddings(self) -> bool:
+        """Load a persisted model if it matches the loaded graph."""
+        if self.kge_store_path is None:
+            return False
+
+        from src.kge import load_model
+
+        restored = load_model(self.kge_store_path, edge_count=len(self.edges))
+        if restored is None:
+            return False
+
+        model, store, saved_report = restored
+        self.kge_model = model
+        self.kge_store = store
+        self.kge_saved_report = saved_report
+        self.kge_edge_count = len(self.edges)
+
+        # The evaluation is restored as data, not recomputed. It described
+        # this graph at training time and still does, because a graph that
+        # changed would have failed the edge-count check above.
+        from types import SimpleNamespace
+
+        self.kge_report = SimpleNamespace(
+            describe=lambda: saved_report,
+            evaluation=SimpleNamespace(
+                mrr=saved_report["model"]["mrr"],
+                hits_at_10=saved_report["model"]["hits_at_10"]),
+            baselines=[SimpleNamespace(model=b["model"], mrr=b["mrr"])
+                       for b in saved_report["baselines"]],
+            parameters=saved_report["parameters"],
+            beats_baselines=saved_report["beats_baselines"],
+        )
+        return True
 
     async def load_from_neo4j(self, config_path: str = "config/settings.json") -> int:
         """Populate from the persisted graph. Returns the edge count."""
@@ -299,6 +338,11 @@ class EvidenceGraphService:
         # reloaded -- can be detected rather than quietly served.
         self.kge_graph_source = self.graph_source
         self.kge_edge_count = len(self.edges)
+
+        if model is not None and self.kge_store_path is not None:
+            from src.kge import save_model
+
+            save_model(self.kge_store_path, model, store, report, len(self.edges))
 
         logger.info(
             f"{model_name}: MRR {report.evaluation.mrr:.4f}, "

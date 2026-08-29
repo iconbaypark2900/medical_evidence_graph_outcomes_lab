@@ -323,3 +323,101 @@ def test_the_scorer_returns_one_score_per_candidate():
     scores = kge_scorer(model, store)("doc_0", "HAS_CONDITION", store.entities)
 
     assert scores.shape == (len(store.entities),)
+
+
+# --------------------------------------------------------------------------
+# Persistence
+#
+# Training is 300 epochs behind a held-out evaluation, and it lived in an
+# instance attribute. A restart discarded it and the service then reported
+# "no embeddings have been trained", which reads as never-trained rather
+# than trained-and-lost.
+# --------------------------------------------------------------------------
+
+def test_a_model_survives_a_round_trip(tmp_path):
+    from src.kge import load_model, save_model
+
+    store = TripleStore(learnable_graph())
+    train, _, _ = store.split(seed=0)
+    model = train_kge(store, train, epochs=30, seed=0)
+    _, _, report = build_and_evaluate(learnable_graph(), epochs=30, seed=0)
+
+    path = tmp_path / "embeddings.pt"
+    save_model(path, model, store, report, edge_count=len(store.triples))
+    restored = load_model(path, edge_count=len(store.triples))
+
+    assert restored is not None
+    loaded_model, loaded_store, loaded_report = restored
+    assert loaded_store.entities == store.entities
+    assert loaded_report["model"]["mrr"] == report.describe()["model"]["mrr"]
+
+
+def test_the_restored_model_scores_identically(tmp_path):
+    """A model that loads but scores differently is worse than none: the
+    saved MRR is still reported alongside it."""
+    from src.kge import load_model, save_model
+
+    store = TripleStore(learnable_graph())
+    train, _, _ = store.split(seed=0)
+    model = train_kge(store, train, epochs=30, seed=0)
+    _, _, report = build_and_evaluate(learnable_graph(), epochs=30, seed=0)
+
+    before = kge_scorer(model, store)("doc_0", "HAS_CONDITION", store.entities)
+
+    path = tmp_path / "embeddings.pt"
+    save_model(path, model, store, report, edge_count=len(store.triples))
+    loaded_model, loaded_store, _ = load_model(path)
+
+    after = kge_scorer(loaded_model, loaded_store)(
+        "doc_0", "HAS_CONDITION", loaded_store.entities)
+
+    np.testing.assert_allclose(before, after, rtol=1e-6)
+
+
+def test_the_vocabulary_travels_with_the_weights(tmp_path):
+    """Entity indices are positional; a state dict alone is a matrix of
+    numbers meaning whatever the graph meant at training time."""
+    from src.kge import load_model, save_model
+
+    store = TripleStore(learnable_graph())
+    train, _, _ = store.split(seed=0)
+    model = train_kge(store, train, epochs=10, seed=0)
+    _, _, report = build_and_evaluate(learnable_graph(), epochs=10, seed=0)
+
+    path = tmp_path / "embeddings.pt"
+    save_model(path, model, store, report, edge_count=len(store.triples))
+    _, loaded_store, _ = load_model(path)
+
+    assert loaded_store.entity_index == store.entity_index
+    assert loaded_store.relation_index == store.relation_index
+
+
+def test_a_model_trained_on_a_different_graph_is_refused(tmp_path):
+    """Its indices no longer point at the same entities, so it would score
+    confidently about the wrong things."""
+    from src.kge import load_model, save_model
+
+    store = TripleStore(learnable_graph())
+    train, _, _ = store.split(seed=0)
+    model = train_kge(store, train, epochs=10, seed=0)
+    _, _, report = build_and_evaluate(learnable_graph(), epochs=10, seed=0)
+
+    path = tmp_path / "embeddings.pt"
+    save_model(path, model, store, report, edge_count=500)
+
+    assert load_model(path, edge_count=501) is None
+
+
+def test_a_missing_store_loads_as_nothing(tmp_path):
+    from src.kge import load_model
+
+    assert load_model(tmp_path / "nothing.pt") is None
+
+
+def test_an_unreadable_store_does_not_raise(tmp_path):
+    from src.kge import load_model
+
+    path = tmp_path / "embeddings.pt"
+    path.write_bytes(b"not a torch file")
+
+    assert load_model(path) is None

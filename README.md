@@ -153,6 +153,10 @@ authenticated requests on a viewer's behalf.
 | `POST /api/pathways/guidelines` | Register a guideline as a machine-readable pathway |
 | `POST /api/pathways/adherence` | Score observed care against a guideline |
 | `GET /api/pathways/guidelines/{id}/evidence` | **Current evidence for each step of a guideline** |
+| `GET /api/graph` | Loaded graph and the embeddings' evaluation |
+| `POST /api/graph/reload` | Load the graph from Neo4j |
+| `POST /api/graph/embeddings/train` | Train KGE; reports whether it beat its baselines |
+| `GET /api/graph/suggestions` | Link suggestions, saying which predictor ran |
 | `GET /api/evidence/search` | Retrieval over the indexed corpus, live fallback |
 
 **Every analysis endpoint requires the observed outcome as part of the
@@ -269,6 +273,14 @@ measures.
 
 Each served suggestion carries the model's held-out MRR, and the score is
 called a score rather than a confidence, because it is not a probability.
+
+Trained embeddings persist to `MEG_MODEL_STORE` with their vocabulary and
+the edge count of the graph they were trained on. Entity indices are
+positional, so a model whose graph has since changed is refused rather
+than loaded — it would score confidently about the wrong entities.
+
+The **Graph & Embeddings** page reloads the graph, trains, shows the
+model against its baselines, and serves suggestions.
 
 ### Analysis library directly
 
