@@ -55,6 +55,23 @@ class EvidenceIngestionService:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        # Persist whatever tree numbers this run had to look up.
+        #
+        # The classifier caches to disk but nothing wrote the cache back on
+        # this path, so every ingest re-fetched every descriptor missing from
+        # data/mesh_tree_cache.json -- two serialised NCBI calls each, 0.35s
+        # apart -- and then discarded the answers. That is slow enough to
+        # dominate a large ingest and rude enough to earn a rate limit.
+        #
+        # Saved even when the run failed: the lookups that did complete are
+        # still correct, and paying for them twice helps nobody.
+        try:
+            self.mesh.save_cache()
+        except OSError as e:
+            # A cache that cannot be written is a performance problem, not a
+            # correctness one. Say so and carry on; the alternative is an
+            # ingest that succeeded reporting failure.
+            logger.warning(f"Could not save the MeSH tree cache: {e}")
         return False
 
     def define_sources(self) -> List[EvidenceSource]:

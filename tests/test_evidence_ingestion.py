@@ -8,6 +8,8 @@ retrieval function is injected so these tests need no network.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from src.data_ingestion import MedicalEvidence
@@ -417,3 +419,40 @@ def test_unclassified_descriptors_stay_searchable():
     # ...but still indexed, and still findable.
     assert "Treatment Outcome" in document["mesh_terms"]
     assert "Kidney" in document["mesh_terms"]
+
+
+async def test_the_mesh_cache_is_saved_when_the_service_closes(tmp_path):
+    """Tree numbers looked up during a run survive it.
+
+    Nothing wrote the cache back on the ingest path, so every run re-fetched
+    every descriptor missing from the committed cache -- two serialised NCBI
+    calls each -- and threw the answers away. On a corpus of any size that is
+    the dominant cost of ingestion.
+    """
+    from src.mesh import MeshClassifier
+
+    cache = tmp_path / "tree_cache.json"
+    classifier = MeshClassifier(cache, offline=True)
+    classifier._cache["Aspirin"] = ["D02.455"]
+
+    async with EvidenceIngestionService(mesh_classifier=classifier):
+        pass
+
+    assert cache.exists(), "the cache was not written when the service closed"
+    assert "Aspirin" in json.loads(cache.read_text())
+
+
+async def test_a_cache_that_cannot_be_written_does_not_fail_the_run(tmp_path):
+    """An unwritable cache is a performance problem, not a correctness one."""
+    from src.mesh import MeshClassifier
+
+    classifier = MeshClassifier(tmp_path / "nope" / "deep" / "cache.json",
+                                offline=True)
+
+    def explode():
+        raise OSError("read-only file system")
+
+    classifier.save_cache = explode
+
+    async with EvidenceIngestionService(mesh_classifier=classifier):
+        pass  # must not raise
