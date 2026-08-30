@@ -29,7 +29,9 @@ from src.kge import (
     frequency_baseline,
     kge_scorer,
     train_kge,
+    paired_margin,
 )
+from tests.test_evidence_graph import learnable_triples
 
 
 def learnable_graph(n_docs: int = 60) -> list:
@@ -421,3 +423,85 @@ def test_an_unreadable_store_does_not_raise(tmp_path):
     path.write_bytes(b"not a torch file")
 
     assert load_model(path) is None
+
+
+# ---------------------------------------------------------------------------
+# The serving gate
+#
+# It used to be `all(evaluation.mrr > b.mrr for b in baselines)` -- one mean
+# against another. On the 32-triple test set the real graph produces, that
+# let DistMult through on an MRR margin of +0.043 while it lost to the same
+# baseline on Hits@3, Hits@10 and mean rank (18.9 against 3.8). A margin
+# worth about one triple is not evidence, and the gate exists to demand
+# evidence. It now requires the margin to be decisive.
+# ---------------------------------------------------------------------------
+
+def _evaluation(name, ranks):
+    """An Evaluation carrying real per-triple ranks, with matching means."""
+    arr = np.array(ranks, dtype=float)
+    return Evaluation(
+        model=name,
+        mrr=float(np.mean(1.0 / arr)),
+        hits_at_1=float(np.mean(arr <= 1)),
+        hits_at_3=float(np.mean(arr <= 3)),
+        hits_at_10=float(np.mean(arr <= 10)),
+        n_test=len(arr),
+        mean_rank=float(np.mean(arr)),
+        ranks=tuple(arr.tolist()),
+    )
+
+
+def test_a_higher_mrr_is_not_enough_when_the_margin_is_noise():
+    """Ahead on the mean, inside the noise: refused.
+
+    The model wins on half the triples by a lot and loses on the other half
+    by a lot. Its MRR is higher; its per-triple advantage is indistinguishable
+    from zero. This is the shape of the real DistMult-vs-frequency comparison.
+    """
+    model = _evaluation("model", [1, 40, 1, 40, 1, 40, 1, 40, 1, 40])
+    baseline = _evaluation("frequency", [30, 2, 30, 2, 30, 2, 30, 2, 30, 3])
+
+    margin = paired_margin(model, baseline)
+
+    assert model.mrr > baseline.mrr, "precondition: the old gate would pass this"
+    assert not margin.decisive
+    assert margin.ci_low < 0 < margin.ci_high
+
+
+def test_a_consistent_advantage_is_decisive():
+    """Better on nearly every triple, by a little: served."""
+    model = _evaluation("model", [1, 1, 2, 1, 2, 1, 1, 2, 1, 1])
+    baseline = _evaluation("frequency", [4, 3, 5, 4, 6, 3, 4, 5, 4, 3])
+
+    margin = paired_margin(model, baseline)
+
+    assert margin.decisive
+    assert margin.ci_low > 0
+
+
+def test_no_interval_exists_for_a_single_paired_triple():
+    """One triple supports no interval, so it supports no verdict.
+
+    The bound is None rather than infinite: this goes out through
+    /api/graph/embeddings/train, and json.dumps refuses non-finite floats.
+    """
+    margin = paired_margin(_evaluation("model", [1]), _evaluation("frequency", [9]))
+
+    assert not margin.decisive
+    assert margin.ci_low is None and margin.ci_high is None
+    assert margin.describe()["ci95"] is None
+
+
+def test_the_gate_refuses_a_model_it_cannot_separate_from_a_baseline():
+    """End to end: build_and_evaluate returns None for the model."""
+    triples = learnable_triples(n_docs=6, n_topics=2)
+    model, _store, report = build_and_evaluate(
+        triples, model_name="distmult", dim=8, epochs=5, seed=0)
+
+    # Five epochs on six documents cannot beat the frequency baseline
+    # decisively, and the gate says so rather than serving on a lucky mean.
+    assert report.beats_baselines is False
+    assert model is None
+    assert report.margins, "the report must carry the comparison behind the verdict"
+    assert all(m.describe()["ci95"] is None or len(m.describe()["ci95"]) == 2
+               for m in report.margins)

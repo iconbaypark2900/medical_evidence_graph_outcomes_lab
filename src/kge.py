@@ -27,6 +27,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
+from scipy.stats import t as student_t
 import torch.nn as nn
 
 
@@ -158,6 +159,13 @@ class Evaluation:
     hits_at_10: float
     n_test: int
     mean_rank: float
+    # Per-triple ranks, in test order. Kept so a model can be compared to a
+    # baseline triple by triple rather than mean against mean: with a test
+    # set this small, the difference between two MRRs is a handful of
+    # triples, and a paired comparison is the only way to tell a real
+    # margin from a lucky one. Excluded from describe() -- it is data for
+    # the gate, not a metric to publish.
+    ranks: Tuple[float, ...] = ()
 
     def describe(self) -> Dict[str, Any]:
         return {
@@ -213,8 +221,65 @@ def evaluate_ranking(score_fn, store: TripleStore, test: Sequence[Triple],
         hits_at_3=float(np.mean(ranks_array <= 3)),
         hits_at_10=float(np.mean(ranks_array <= 10)),
         mean_rank=float(np.mean(ranks_array)),
+        ranks=tuple(ranks_array.tolist()),
         n_test=len(ranks),
     )
+
+
+@dataclass
+class Margin:
+    """A paired MRR comparison between a model and one baseline."""
+    baseline: str
+    margin: float                  # mean per-triple difference in reciprocal rank
+    # The 95% interval on that mean, or None when there are too few paired
+    # triples to form one. None rather than an infinite bound: this goes out
+    # through the API, and json.dumps refuses non-finite floats.
+    ci_low: Optional[float]
+    ci_high: Optional[float]
+    decisive: bool                 # the interval excludes zero on the winning side
+
+    def describe(self) -> Dict[str, Any]:
+        return {
+            "baseline": self.baseline,
+            "mrr_margin": round(self.margin, 4),
+            "ci95": (None if self.ci_low is None or self.ci_high is None
+                     else [round(self.ci_low, 4), round(self.ci_high, 4)]),
+            "decisive": self.decisive,
+        }
+
+
+def paired_margin(evaluation: Evaluation, baseline: Evaluation) -> Margin:
+    """Compare two evaluations triple by triple, with an interval.
+
+    Both are ranked over the same held-out triples in the same order, so the
+    per-triple reciprocal ranks pair up and their difference has far less
+    variance than the two means do separately.
+
+    The interval is what the gate needs. A model whose MRR is higher by less
+    than the spread of its own per-triple differences has not been shown to
+    be better; it has been shown to be ahead on this particular sample of
+    held-out triples, which is a different claim and not one worth serving a
+    model on.
+    """
+    n = min(len(evaluation.ranks), len(baseline.ranks))
+    if n < 2:
+        # One paired triple, or none. No interval exists, so nothing has been
+        # shown; not decisive whatever the means say.
+        return Margin(baseline.model, evaluation.mrr - baseline.mrr,
+                      None, None, False)
+
+    diff = (1.0 / np.array(evaluation.ranks[:n])
+            - 1.0 / np.array(baseline.ranks[:n]))
+    margin = float(np.mean(diff))
+    se = float(np.std(diff, ddof=1) / np.sqrt(n))
+
+    if se == 0.0:
+        # Every triple moved the same way; the mean is the whole story.
+        return Margin(baseline.model, margin, margin, margin, margin > 0)
+
+    half = float(student_t.ppf(0.975, n - 1)) * se
+    low, high = margin - half, margin + half
+    return Margin(baseline.model, margin, low, high, low > 0)
 
 
 def frequency_baseline(train: Sequence[Triple]):
@@ -422,6 +487,10 @@ class KGEReport:
     predictor that loses to "suggest whatever usually appears" is
     complexity without benefit, and serving its output anyway would be the
     random-confidence problem again in a more convincing costume.
+
+    `margins` carries the paired per-triple comparison behind that verdict,
+    with an interval. It is there because the mean-against-mean version of
+    this test could not tell a real improvement from a lucky sample.
     """
     evaluation: Evaluation
     baselines: List[Evaluation]
@@ -429,6 +498,7 @@ class KGEReport:
     n_triples: int
     n_entities: int
     parameters: Dict[str, Any]
+    margins: List["Margin"] = field(default_factory=list)
 
     def compare(self) -> Dict[str, Dict[str, bool]]:
         """Per-metric comparison against each baseline.
@@ -457,14 +527,19 @@ class KGEReport:
             "model": self.evaluation.describe(),
             "baselines": [b.describe() for b in self.baselines],
             "beats_baselines": self.beats_baselines,
+            "margins": [m.describe() for m in self.margins],
             "comparison": comparison,
             "loses_to_a_baseline_on": lost_on,
             "graph": {"triples": self.n_triples, "entities": self.n_entities},
             "parameters": self.parameters,
             "note": (
                 "Filtered tail-prediction on held-out triples. Serving is "
-                "gated on MRR against every baseline; metrics the model "
-                "loses on are listed rather than averaged away. Note that "
+                "gated on the MRR margin over every baseline being decisive "
+                "-- the 95% interval on the paired per-triple difference "
+                "must exclude zero -- not on one mean exceeding another. "
+                "Metrics the model loses on are listed rather than averaged "
+                "away, and a model can be refused while its MRR is higher. "
+                "Note that "
                 "adamic_adar is scored here on evidence-to-entity tail "
                 "prediction, which is not the entity-to-entity suggestion "
                 "task it performs in evidence_graph_service -- its number "
@@ -498,19 +573,34 @@ def build_and_evaluate(triples: Sequence[Triple], model_name: str = "transe",
                          store.triples, "adamic_adar"),
     ]
 
-    beats = all(evaluation.mrr > b.mrr for b in baselines)
+    # The gate used to be `all(evaluation.mrr > b.mrr for b in baselines)`:
+    # a bare comparison of means. On a 32-triple test set that let a model
+    # through on a margin worth about one triple, while it lost to the same
+    # baseline on Hits@3, Hits@10 and mean rank. Serving is now gated on the
+    # margin being decisive -- the 95% interval on the paired per-triple
+    # difference has to exclude zero -- so "better" means measurably better,
+    # not ahead on this sample.
+    margins = [paired_margin(evaluation, b) for b in baselines]
+    beats = all(m.decisive for m in margins)
     report = KGEReport(
         evaluation=evaluation, baselines=baselines, beats_baselines=beats,
         n_triples=len(triples), n_entities=len(store.entities),
         parameters={"model": model_name, "dim": dim, "epochs": epochs,
                     "train": len(train), "test": len(test)},
+        margins=margins,
     )
 
     if not beats:
+        undecided = [m for m in margins if not m.decisive]
         logger.warning(
-            f"{model_name} MRR {evaluation.mrr:.4f} does not beat every "
-            f"baseline ({[f'{b.model} {b.mrr:.4f}' for b in baselines]}); "
-            f"not recommending it for serving")
+            f"{model_name} is not measurably better than every baseline on "
+            f"{evaluation.n_test} held-out triples; not recommending it for "
+            f"serving. " + "; ".join(
+                f"vs {m.baseline}: MRR margin {m.margin:+.4f}, "
+                + ("95% CI unavailable (too few paired triples)"
+                   if m.ci_low is None else
+                   f"95% CI [{m.ci_low:+.4f}, {m.ci_high:+.4f}]")
+                for m in undecided))
 
     return (model if beats else None), store, report
 

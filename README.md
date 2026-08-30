@@ -282,10 +282,16 @@ Trains TransE or DistMult on the triples in Neo4j and scores it with
 filtered MRR and Hits@K on held-out triples, against a frequency baseline
 ("suggest whatever usually appears with this relation") and Adamic-Adar.
 
-**A model is served only if it beats every baseline on MRR.** A link
-predictor that loses to guessing the commonest tail is complexity without
-benefit, and serving it anyway would be the random-confidence problem in a
-more convincing costume.
+**A model is served only if it is measurably better than every baseline.**
+A link predictor that loses to guessing the commonest tail is complexity
+without benefit, and serving it anyway would be the random-confidence
+problem in a more convincing costume.
+
+"Measurably" is the load-bearing word. The gate compares the model to each
+baseline **triple by triple** and requires the 95% interval on that paired
+difference to exclude zero. Comparing one mean to another is not enough at
+this scale: an MRR gap of 0.04 on 32 held-out triples is worth about one
+triple, and one triple is not evidence.
 
 Measured 2026-08-30 on the indexed graph — **460 triples, 234 entities**,
 300 epochs at dim 64. 29 held-out triples were returned to training
@@ -299,19 +305,26 @@ rank them, leaving **32 test triples**:
 | TransE | 0.293 | 0.094 | 0.406 | 0.719 | 12.6 |
 | Adamic-Adar | 0.039 | 0.000 | 0.000 | 0.000 | 25.8 |
 
-TransE loses to the frequency baseline and is refused. DistMult beats it
-on MRR and is served — **and loses to it on Hits@3, Hits@10 and mean
-rank.** It wins the gated metric by being confidently right on a few
-triples and badly wrong on the rest, which a mean rank of 18.9 against
-the baseline's 3.8 is the clearest statement of. The gate checks MRR
-only; the report lists the rest rather than averaging them away, and
-those two facts are currently in tension. See *Known limitation* below.
+Paired against the frequency baseline, which is the one that matters:
 
-**These numbers cannot separate these models.** With 32 test triples one
-triple is 3.1% of the metric, and DistMult's 0.043 MRR margin over the
-baseline is worth about 1.4 of them. Treat the ordering as provisional
-until the corpus is large enough for the comparison to mean something —
-that, not the model architecture, is the thing worth changing.
+| model | MRR margin | 95% CI | decisive |
+|---|---|---|---|
+| DistMult | +0.043 | [−0.124, +0.209] | **no** |
+| TransE | −0.218 | [−0.360, −0.075] | no (loses) |
+
+**Neither model is served.** TransE is clearly worse. DistMult's MRR is
+higher, but its interval spans zero — it is ahead on this sample of
+held-out triples, which is a different claim from being better, and not
+one worth serving a model on. The mean ranks say the same thing more
+bluntly: 18.9 against the baseline's 3.8. DistMult wins the mean by being
+confidently right on a few triples and badly wrong on the rest.
+
+With nothing served, `/api/graph/suggestions` falls back to structural
+suggestion and reports which predictor ran.
+
+**This is a statement about the corpus, not about DistMult.** 32 held-out
+triples cannot separate these models, and no choice of architecture fixes
+that. Growing the corpus is the thing worth changing.
 
 An earlier version of this table reported 0.527 / 0.309 / 0.457 / 0.035
 on a "607-triple corpus". Those figures came from a real run, but on a
@@ -322,18 +335,6 @@ measurements reproducible from the command above.
 Adamic-Adar's number is not a verdict on its use in the service: there it
 ranks entities against entities, and this evaluation asks it for
 evidence-to-entity tail prediction, which is not what it measures.
-
-#### Known limitation: the gate reads one metric
-
-`beats = all(evaluation.mrr > b.mrr for b in baselines)` (`src/kge.py`)
-decides serving on MRR alone. The report already computes
-`loses_to_a_baseline_on` for every other metric and prints it — but
-nothing acts on it, so a model can be served while losing on the majority
-of what was measured. That is the state above: DistMult is served on a
-0.043 MRR margin while ranking five times worse by mean rank.
-
-The gate was written to stop a link predictor that loses to guessing the
-commonest tail from being served. On this evaluation it does not do that.
 
 Each served suggestion carries the model's held-out MRR, and the score is
 called a score rather than a confidence, because it is not a probability.
