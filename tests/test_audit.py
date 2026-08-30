@@ -193,8 +193,34 @@ def test_the_audit_endpoint_needs_a_key(audited):
     assert client.get("/api/audit").status_code == 401
 
 
+# Fields whose values are opaque identifiers -- a key hash, a model version,
+# an ISO timestamp. They are hex or digits by construction, so a substring
+# search for a short patient value hits them by coincidence: this test failed
+# once because the age 71 appears inside the model version "e711bdd3e4a1".
+# Scanning them proves nothing, because they cannot carry patient content.
+_OPAQUE_AUDIT_FIELDS = {"actor", "model_version", "timestamp"}
+
+
+def _audited_values(events):
+    """Every leaf value in the log that could carry content, as strings."""
+    out = []
+
+    def walk(node, key=None):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, k)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v, key)
+        elif key not in _OPAQUE_AUDIT_FIELDS:
+            out.append(str(node))
+
+    walk(events)
+    return out
+
+
 def test_no_patient_content_can_be_read_back_out(audited):
-    """Nothing is recorded, so nothing can be retrieved."""
+    """Only metadata is recorded, so no patient content can be retrieved."""
     log, client = audited
     client.post(
         "/api/patients/risk-assessment",
@@ -203,9 +229,58 @@ def test_no_patient_content_can_be_read_back_out(audited):
                "clinical_indicators": {"baseline_risk_score": 0.9, "comorbidity_count": 4}}],
         headers={"X-API-Key": "caller-one"})
 
-    dumped = json.dumps(log.read())
-    for value in ("pt_0", "Asian", "0.9", "71"):
-        assert value not in dumped, f"{value!r} reached the audit log"
+    values = _audited_values(log.read())
+    for sensitive in ("pt_0", "Asian", "0.9", "71"):
+        offenders = [v for v in values if sensitive in v]
+        assert not offenders, f"{sensitive!r} reached the audit log: {offenders}"
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "guideline.adherence records patient_id; src/audit.py promises metadata "
+    "only. Fix the handler and this becomes a hard failure."))
+def test_guideline_adherence_does_not_record_the_patient_id(audited):
+    """The adherence endpoint writes patient_id into the log.
+
+    src/audit.py's docstring says the log carries metadata only and never
+    patient content, and the risk-assessment path above holds to that. The
+    adherence handler does not: api_backend.py:1699 passes
+    patient_id=request.patient_id to audit_log.record, and unlike the
+    analysis endpoints it never screens its payload for PHI.
+
+    xfail(strict) rather than the known_defect marker: that marker is
+    registered in pyproject.toml but nothing converts it to xfail, so a test
+    carrying it would simply fail the suite. The strict xfail here does what
+    the CI comment says known_defect does -- documents the bug now, and turns
+    into a hard failure the moment someone fixes it.
+
+    The fix is probably not to drop the field. Recording which patient was
+    scored is legitimate for an adherence audit; recording the raw identifier
+    is what breaks the promise. Hashing it the way actor_id already hashes API
+    keys would keep the linkage and lose the identifier.
+    """
+    log, client = audited
+
+    registered = client.post(
+        "/api/pathways/guidelines",
+        json={"id": "gl-audit", "name": "Audit guideline", "condition": "diabetes",
+              "steps": [{"name": "metformin", "type": "intervention"}]},
+        headers={"X-API-Key": "caller-one"})
+    assert registered.status_code == 200, registered.text
+
+    scored = client.post(
+        "/api/pathways/adherence",
+        json={"guideline_id": "gl-audit", "patient_id": "pt_secret",
+              "condition": "diabetes", "steps": [{"name": "metformin"}]},
+        headers={"X-API-Key": "caller-one"})
+    # Assert the request actually succeeded. Without this the test passes
+    # whenever the payload is wrong, which is how its first version passed:
+    # pydantic drops unknown fields silently, so a misnamed key 422s and
+    # nothing is ever recorded to find.
+    assert scored.status_code == 200, scored.text
+
+    values = _audited_values(log.read())
+    offenders = [v for v in values if "pt_secret" in v]
+    assert not offenders, f"patient_id reached the audit log: {offenders}"
 
 
 # --------------------------------------------------------------------------
