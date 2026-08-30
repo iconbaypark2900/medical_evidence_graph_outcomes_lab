@@ -28,17 +28,38 @@ jobs:
           # CPU-only torch: the suite needs no GPU, and the CUDA wheel is
           # several GB of download per job.
           pip install --index-url https://download.pytorch.org/whl/cpu torch
-          pip install -e '.[dev]'
+          # `ui` as well as `dev`: the frontend tests guard on
+          # importorskip("streamlit"), so without it the 15 rendering tests
+          # skip silently and the largest module in the project goes
+          # untested here while looking green.
+          pip install -e '.[dev,ui]'
 
       - name: Run tests
         # The `requires_stack` tests skip here by design -- this job has no
         # backing services. They run in the `integration` job below.
         run: python -m pytest -q --cov=src --cov-report=term-missing
 
+      - name: Fail if the frontend tests skipped
+        # Same rule the integration job applies to itself: a test that skips
+        # reports green while proving nothing. These skip only when the ui
+        # extra is missing, which in CI means the install above regressed.
+        run: |
+          # pipefail as in the integration job below: without it `tee`
+          # returns 0 and a failing run reports as a passing step.
+          set -o pipefail
+          python -m pytest -q tests/test_frontend_pages.py -rs | tee frontend.txt
+          if grep -qE "[0-9]+ skipped" frontend.txt; then
+            echo "The frontend tests skipped; the ui extra is not installed." >&2
+            exit 1
+          fi
+
       - name: Report known defects
-        # known_defect tests are xfail(strict), so a fixed bug turns into a
-        # hard failure -- and the run above already catches that. This step
-        # only surfaces the current list as its own line.
+        # Registered in pyproject and selectable, but nothing converts it to
+        # xfail: a test carrying the marker simply fails. Where a defect
+        # needs pinning, use an explicit @pytest.mark.xfail(strict=True) --
+        # that does what this comment used to claim the marker did.
+        #
+        # This step surfaces the current list as its own line.
         #
         # pytest exits 5 when a marker selects nothing, which is the normal
         # state here: there are currently no known defects. Treat 5 as
