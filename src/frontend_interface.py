@@ -1056,13 +1056,13 @@ def page_graph_embeddings():
         # reader should see that rather than a score in isolation.
         if embeddings["served"]:
             st.success(
-                f"`{model['model']}` beat every baseline on MRR and is being "
-                f"served.")
+                f"`{model['model']}` is measurably better than every baseline "
+                f"and is being served.")
         else:
             st.warning(
-                f"`{model['model']}` did not beat every baseline, so its "
-                f"suggestions are not served. The structural scorer is used "
-                f"instead.")
+                f"`{model['model']}` is not measurably better than every "
+                f"baseline, so its suggestions are not served. The structural "
+                f"scorer is used instead.")
 
         rows = [{"predictor": b["model"], "MRR": b["mrr"],
                  "Hits@1": b["hits_at_1"], "Hits@10": b["hits_at_10"]}
