@@ -8,6 +8,7 @@ there is now an identity to attribute an action to.
 from __future__ import annotations
 
 import json
+from collections import Counter
 
 import pytest
 from fastapi.testclient import TestClient
@@ -235,28 +236,18 @@ def test_no_patient_content_can_be_read_back_out(audited):
         assert not offenders, f"{sensitive!r} reached the audit log: {offenders}"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "guideline.adherence records patient_id; src/audit.py promises metadata "
-    "only. Fix the handler and this becomes a hard failure."))
 def test_guideline_adherence_does_not_record_the_patient_id(audited):
-    """The adherence endpoint writes patient_id into the log.
+    """The adherence endpoint records a hash, not the patient id.
 
-    src/audit.py's docstring says the log carries metadata only and never
-    patient content, and the risk-assessment path above holds to that. The
-    adherence handler does not: api_backend.py:1699 passes
-    patient_id=request.patient_id to audit_log.record, and unlike the
-    analysis endpoints it never screens its payload for PHI.
+    It used to pass patient_id=request.patient_id straight to
+    audit_log.record while never screening its payload for PHI, which made
+    src/audit.py's "metadata only, never patient content" untrue of that one
+    path. It now records subject=subject_id(...), hashed the way actor_id
+    hashes API keys.
 
-    xfail(strict) rather than the known_defect marker: that marker is
-    registered in pyproject.toml but nothing converts it to xfail, so a test
-    carrying it would simply fail the suite. The strict xfail here does what
-    the CI comment says known_defect does -- documents the bug now, and turns
-    into a hard failure the moment someone fixes it.
-
-    The fix is probably not to drop the field. Recording which patient was
-    scored is legitimate for an adherence audit; recording the raw identifier
-    is what breaks the promise. Hashing it the way actor_id already hashes API
-    keys would keep the linkage and lose the identifier.
+    Dropping the field outright would have been the wrong fix: an adherence
+    audit that cannot tell two patients apart cannot answer what it exists
+    for. The hash keeps that linkage and loses the identifier.
     """
     log, client = audited
 
@@ -373,3 +364,35 @@ def test_no_events_are_lost_before_the_retention_limit(tmp_path):
 
     actions = {e["action"] for e in log.read(limit=1000)}
     assert actions == {f"event_{i}" for i in range(60)}
+
+
+def test_the_subject_hash_is_stable_and_distinguishes_patients(audited):
+    """The linkage the raw id provided survives hashing.
+
+    Two adherence scores for the same patient must still be visibly about
+    the same patient, and two different patients must not collide. Without
+    that the hash would be privacy at the cost of the audit's purpose.
+    """
+    log, client = audited
+    client.post("/api/pathways/guidelines",
+                json={"id": "gl-subject", "name": "G", "condition": "diabetes",
+                      "steps": [{"name": "metformin", "type": "intervention"}]},
+                headers={"X-API-Key": "caller-one"})
+
+    for patient in ("pt_a", "pt_a", "pt_b"):
+        assert client.post(
+            "/api/pathways/adherence",
+            json={"guideline_id": "gl-subject", "patient_id": patient,
+                  "condition": "diabetes", "steps": [{"name": "metformin"}]},
+            headers={"X-API-Key": "caller-one"}).status_code == 200
+
+    subjects = [e["subject"] for e in log.read()
+                if e.get("action") == "guideline.adherence"]
+
+    # Order-independent: log.read() returns newest first, and which end the
+    # repeated patient lands on is not the thing under test.
+    counts = Counter(subjects)
+    assert len(subjects) == 3
+    assert len(counts) == 2, "two distinct patients, so two distinct hashes"
+    assert counts.most_common(1)[0][1] == 2, "same patient must hash the same"
+    assert not any("pt_a" in s or "pt_b" in s for s in subjects)

@@ -401,6 +401,12 @@ the data it audits becomes the largest copy of that data in the system,
 in the file least likely to be access-controlled. Actors are a hash of the
 API key, so the log is not a list of live credentials.
 
+Where a record is about one patient — a guideline adherence score is
+meaningless without knowing whose care was scored — the subject is hashed
+the same way, so two scores for the same patient stay visibly the same
+patient without the identifier being stored. That endpoint previously
+wrote the raw `patient_id`, which made this section untrue of one path.
+
 `GET /api/audit` reads it back, and the **Audit Trail** page shows it.
 
 ### PHI screening

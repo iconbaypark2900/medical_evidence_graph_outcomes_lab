@@ -44,7 +44,7 @@ from sklearn.metrics import r2_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 
 from src.data_ingestion import ClinicalTrialsFetcher, PubMedFetcher
-from src.audit import AuditLog, actor_id
+from src.audit import AuditLog, actor_id, subject_id
 from src.observability import (
     ExperimentTracker,
     Metrics,
@@ -1696,7 +1696,13 @@ async def evaluate_adherence(request: AdherenceRequest,
 
     audit_log.record(
         "guideline.adherence", actor=actor_id(_key),
-        guideline_id=request.guideline_id, patient_id=request.patient_id,
+        guideline_id=request.guideline_id,
+        # Hashed, not raw: this endpoint is the one place a patient
+        # identifier reached the log, and src/audit.py promises it holds no
+        # patient content. The hash keeps the linkage an adherence audit
+        # needs -- two scores for the same patient are still visibly the
+        # same patient -- without storing the identifier.
+        subject=subject_id(request.patient_id),
         adherence_score=comparison["adherence_score"],
         n_required=comparison["n_required"])
 

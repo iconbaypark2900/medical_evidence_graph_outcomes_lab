@@ -74,6 +74,27 @@ def actor_id(api_key: Optional[str]) -> str:
     return "key:" + hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
 
 
+def subject_id(patient_id: Optional[str]) -> Optional[str]:
+    """Stable, non-reversible identifier for the subject of an analysis.
+
+    Some records are about one patient -- a guideline adherence score is
+    meaningless without knowing whose care was scored -- and an audit trail
+    that cannot distinguish two patients cannot answer the question it
+    exists for. But a raw patient_id is a direct identifier, and this module
+    promises it holds no patient content.
+
+    Hashed for the same reason the API key is: the log keeps the linkage,
+    so two records about the same patient are visibly about the same
+    patient, and loses the identifier. Correlating a hash back to a person
+    requires the id already, which whoever holds the source data has and
+    whoever reads the log should not.
+    """
+    if not patient_id:
+        return None
+    return "subject:" + hashlib.sha256(
+        patient_id.encode("utf-8")).hexdigest()[:12]
+
+
 class AuditLog:
     """JSONL, one event per line, append-only.
 
