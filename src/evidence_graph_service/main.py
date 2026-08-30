@@ -98,6 +98,27 @@ class EvidenceGraphService:
             return False
 
         model, store, saved_report = restored
+
+        # A verdict from the previous gate is not a live answer.
+        #
+        # Serving used to require only that the model's mean MRR exceed each
+        # baseline's. It now requires the margin to be decisive -- the 95%
+        # interval on the paired per-triple difference must exclude zero --
+        # and a model saved before that carries beats_baselines from the
+        # older, weaker test. Restoring it would serve a model the current
+        # gate refuses, which is the same failure as restoring a model whose
+        # graph has changed, and is refused for the same reason.
+        #
+        # "margins" is the marker: the report gained it when the gate did.
+        if "margins" not in saved_report:
+            logger.warning(
+                "Refusing a persisted model whose report predates the "
+                "margin-based gate: its beats_baselines was decided by "
+                "comparing means, which let a model through on a margin "
+                "worth about one held-out triple. Retrain to get a verdict "
+                "the current gate stands behind.")
+            return False
+
         self.kge_model = model
         self.kge_store = store
         self.kge_saved_report = saved_report

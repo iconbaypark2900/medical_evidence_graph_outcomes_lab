@@ -542,3 +542,42 @@ def test_a_persisted_model_is_refused_when_the_graph_changed(tmp_path):
     load_triples_into(changed, learnable_triples(n_docs=60))
 
     assert changed.restore_embeddings() is False
+
+
+def test_a_model_saved_under_the_old_gate_is_refused(tmp_path):
+    """A verdict decided by comparing means is not a live answer.
+
+    Serving used to require only that the model's mean MRR exceed each
+    baseline's; it now requires the margin to be decisive. A model persisted
+    before that change carries the older, weaker verdict in its saved report,
+    and restoring it would serve a model the current gate refuses -- the same
+    failure as restoring a model whose graph has moved.
+
+    The saved report gained "margins" when the gate did, so its absence is
+    what identifies a stale verdict.
+    """
+    import torch
+
+    service = EvidenceGraphService()
+    service.kge_store_path = tmp_path / "embeddings.pt"
+    load_triples_into(service, learnable_triples())
+    service.recompute_kge_features(epochs=200, dim=32)
+    if getattr(service, "kge_model", None) is None:
+        pytest.skip("model did not beat baselines on this seed")
+
+    # Age the persisted report back to what the old gate wrote: the same
+    # file, minus the margins the new gate records.
+    saved = torch.load(service.kge_store_path, weights_only=False)
+    report_key = next(k for k in saved if "report" in k)
+    assert "margins" in saved[report_key], (
+        "precondition: a freshly saved report carries margins")
+    saved[report_key] = {k: v for k, v in saved[report_key].items()
+                         if k != "margins"}
+    torch.save(saved, service.kge_store_path)
+
+    restarted = EvidenceGraphService()
+    restarted.kge_store_path = service.kge_store_path
+    load_triples_into(restarted, learnable_triples())
+
+    assert restarted.restore_embeddings() is False
+    assert getattr(restarted, "kge_model", None) is None
