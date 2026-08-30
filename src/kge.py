@@ -23,6 +23,7 @@ import logging
 import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -605,18 +606,38 @@ def build_and_evaluate(triples: Sequence[Triple], model_name: str = "transe",
     return (model if beats else None), store, report
 
 
-async def main():
-    """Train and evaluate over the populated Neo4j graph."""
+# Where the published evaluation lives. Committed, unlike .model_store/ and
+# .audit/, because the README quotes these numbers and a figure quoted from
+# nothing is how the previous table came to claim a 607-triple corpus that
+# no artifact in the repository had ever recorded.
+EVALUATION_PATH = Path("data/kge_evaluation.json")
+
+
+async def main(report_path: Path = EVALUATION_PATH):
+    """Train and evaluate over the populated Neo4j graph.
+
+    Writes the report to `report_path` as well as printing it. Numbers that
+    reach the README have to come from somewhere a reader -- and a test --
+    can go and check.
+    """
     import json
 
     logging.basicConfig(level=logging.INFO)
     triples = await load_triples_from_neo4j()
     logger.info(f"Loaded {len(triples)} triples")
 
+    reports = {}
     for model_name in ("transe", "distmult"):
         _model, _store, report = build_and_evaluate(
             triples, model_name=model_name, epochs=300)
-        print(json.dumps(report.describe(), indent=2))
+        described = report.describe()
+        reports[model_name] = described
+        print(json.dumps(described, indent=2))
+
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(
+        {"graph": {"triples": len(triples)}, "models": reports}, indent=2) + "\n")
+    logger.info(f"Wrote {report_path}")
 
 
 if __name__ == "__main__":
