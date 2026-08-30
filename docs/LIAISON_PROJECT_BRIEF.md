@@ -62,9 +62,14 @@ against baselines, PHI screening, audit trail, Prometheus metrics.
 Not implemented, and the config says so rather than implying otherwise:
 OIDC, Open Policy Agent, Vault, Langfuse.
 
-The corpus is small — 48 documents, 460 triples (measured 2026-08-30) — which is the binding
-constraint on whether the retrieval and embedding numbers mean much.
-Expand with `python -m src.integration --term "..." --incremental`.
+The corpus is 2874 documents and 26,984 triples (measured 2026-08-30) from
+120 search terms across twelve clinical areas. It was 48 documents and 460
+triples, which was the binding constraint on whether any retrieval or
+embedding number meant anything: the held-out set was 32 triples and the
+gate could not separate a model from the frequency baseline. It now can.
+
+Reproduce or extend with:
+`python -m src.integration --terms-file data/ingestion_terms.txt --max-per-source 12`
 
 ---
 
@@ -80,8 +85,12 @@ Expand with `python -m src.integration --term "..." --incremental`.
 
 ## Next actions
 
-- Expand the corpus; every retrieval and embedding metric is measured on 48 documents.
-- Real authentication if this is to be reachable by anyone else.
+- Real authentication if this is to be reachable by anyone else. The API now
+  refuses rather than serving open when no keys are configured, but a valid
+  key still grants every endpoint: no roles, no per-dataset scope, no tenancy.
+- DistMult loses to the frequency baseline on mean rank (417.9 against 62.9)
+  while beating it on every ranking metric. Worth understanding before the
+  suggestions are relied on for anything that uses the whole ordering.
 
 ---
 

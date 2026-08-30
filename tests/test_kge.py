@@ -505,3 +505,26 @@ def test_the_gate_refuses_a_model_it_cannot_separate_from_a_baseline():
     assert report.margins, "the report must carry the comparison behind the verdict"
     assert all(m.describe()["ci95"] is None or len(m.describe()["ci95"]) == 2
                for m in report.margins)
+
+
+def test_mean_rank_is_compared_in_the_direction_that_makes_it_better():
+    """Lower is better for mean rank, unlike every other metric.
+
+    It was excluded from compare() entirely while the other four were
+    checked, so a model could rank far worse by mean rank and still report
+    losing to a baseline on nothing.
+    """
+    from src.kge import KGEReport
+
+    model = _evaluation("model", [1, 1, 1, 900])       # often right, sometimes hopeless
+    baseline = _evaluation("frequency", [5, 5, 5, 6])  # never right, never far off
+
+    report = KGEReport(evaluation=model, baselines=[baseline],
+                       beats_baselines=True, n_triples=4, n_entities=4,
+                       parameters={}, margins=[])
+    comparison = report.compare()["frequency"]
+
+    assert comparison["mrr"] is True, "the model does win on MRR"
+    assert comparison["mean_rank"] is False, (
+        "the model's mean rank is worse, and worse must read as a loss")
+    assert "mean_rank" in report.describe()["loses_to_a_baseline_on"]

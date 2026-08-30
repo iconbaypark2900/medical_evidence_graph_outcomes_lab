@@ -289,42 +289,48 @@ problem in a more convincing costume.
 
 "Measurably" is the load-bearing word. The gate compares the model to each
 baseline **triple by triple** and requires the 95% interval on that paired
-difference to exclude zero. Comparing one mean to another is not enough at
-this scale: an MRR gap of 0.04 on 32 held-out triples is worth about one
-triple, and one triple is not evidence.
+difference to exclude zero. Comparing one mean to another is not enough:
+on the 460-triple corpus this project started with, the held-out set was
+32 triples and an MRR gap of 0.04 was worth about one of them.
 
-Measured 2026-08-30 on the indexed graph — **460 triples, 234 entities**,
-300 epochs at dim 64. 29 held-out triples were returned to training
+Measured 2026-08-30 on the indexed graph — **26,984 triples, 9097 entities**,
+300 epochs at dim 64. 1098 held-out triples were returned to training
 because their entities appear nowhere else and no embedding model could
-rank them, leaving **32 test triples**:
+rank them, leaving **2127 test triples**:
 
 | model | MRR | Hits@1 | Hits@3 | Hits@10 | mean rank |
 |---|---|---|---|---|---|
-| DistMult | **0.553** | **0.469** | 0.563 | 0.750 | 18.9 |
-| frequency baseline | 0.510 | 0.313 | **0.594** | **0.938** | **3.8** |
-| TransE | 0.293 | 0.094 | 0.406 | 0.719 | 12.6 |
-| Adamic-Adar | 0.039 | 0.000 | 0.000 | 0.000 | 25.8 |
+| DistMult | **0.375** | **0.249** | **0.433** | **0.649** | 417.9 |
+| frequency baseline | 0.293 | 0.158 | 0.362 | 0.566 | **62.9** |
+| TransE | 0.244 | 0.139 | 0.264 | 0.477 | 178.8 |
+| Adamic-Adar | 0.017 | 0.014 | 0.016 | 0.020 | 1107.8 |
 
 Paired against the frequency baseline, which is the one that matters:
 
 | model | MRR margin | 95% CI | decisive |
 |---|---|---|---|
-| DistMult | +0.043 | [−0.124, +0.209] | **no** |
-| TransE | −0.218 | [−0.360, −0.075] | no (loses) |
+| DistMult | +0.083 | [+0.062, +0.103] | **yes** |
+| TransE | −0.049 | [−0.066, −0.032] | no (loses) |
 
-**Neither model is served.** TransE is clearly worse. DistMult's MRR is
-higher, but its interval spans zero — it is ahead on this sample of
-held-out triples, which is a different claim from being better, and not
-one worth serving a model on. The mean ranks say the same thing more
-bluntly: 18.9 against the baseline's 3.8. DistMult wins the mean by being
-confidently right on a few triples and badly wrong on the rest.
+**DistMult is served; TransE is refused.** DistMult beats the frequency
+baseline on MRR, Hits@1, Hits@3 and Hits@10, and its margin is decisive on
+2127 held-out triples rather than 32. TransE loses outright.
 
-With nothing served, `/api/graph/suggestions` falls back to structural
-suggestion and reports which predictor ran.
+**It still loses on mean rank — 417.9 against the baseline's 62.9 — and
+that is reported rather than averaged away.** The two facts are not in
+conflict: DistMult finds the right tail near the top far more often, and
+when it is wrong it is wrong by much further than "suggest whatever
+usually appears" ever is. For ranked suggestions a reader scans, the
+first number is the one that matters; for anything relying on the whole
+ordering, the second is. `loses_to_a_baseline_on` names it on every
+report, and it took a change to name it at all — mean rank was computed
+and printed while only the other four metrics were compared.
 
-**This is a statement about the corpus, not about DistMult.** 32 held-out
-triples cannot separate these models, and no choice of architecture fixes
-that. Growing the corpus is the thing worth changing.
+This corpus is 120 search terms across twelve clinical areas
+(`data/ingestion_terms.txt`), 2874 documents from PubMed and
+ClinicalTrials.gov. The previous evaluation ran on 48 documents and could
+not separate these models at all: DistMult's margin there was +0.043 with
+a 95% interval of [−0.124, +0.209], and the gate refused it.
 
 An earlier version of this table reported 0.527 / 0.309 / 0.457 / 0.035
 on a "607-triple corpus". Those figures came from a real run, but on a

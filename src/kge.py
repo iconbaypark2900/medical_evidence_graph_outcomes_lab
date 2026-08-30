@@ -508,12 +508,18 @@ class KGEReport:
         win on MRR and lose on Hits@10, and collapsing that into a single
         boolean hides the case where the baseline finds the right answer
         in its top ten more often.
+
+        mean_rank is included, and is the one where lower wins. It was left
+        out while every other metric was compared, which is how a model that
+        ranked five times worse by mean rank could be reported as losing on
+        nothing -- the number was computed, printed, and never checked.
         """
-        metrics = ("mrr", "hits_at_1", "hits_at_3", "hits_at_10")
+        higher_is_better = ("mrr", "hits_at_1", "hits_at_3", "hits_at_10")
         return {
             baseline.model: {
-                metric: getattr(self.evaluation, metric) > getattr(baseline, metric)
-                for metric in metrics
+                **{metric: getattr(self.evaluation, metric) > getattr(baseline, metric)
+                   for metric in higher_is_better},
+                "mean_rank": self.evaluation.mean_rank < baseline.mean_rank,
             }
             for baseline in self.baselines
         }
