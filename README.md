@@ -396,4 +396,4 @@ See the project documentation for details on how to contribute to the Medical Ev
 
 ## License
 
-[To be determined]
+Apache License 2.0 — see [`LICENSE`](LICENSE).
