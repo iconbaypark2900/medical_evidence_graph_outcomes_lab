@@ -64,8 +64,18 @@ graph = [
     "sentence-transformers>=3.0",
 ]
 
-[tool.setuptools]
-packages = []
+# `packages = []` installed nothing: `pip install -e .` produced a distribution
+# with no importable module, and the suite passed only because `pythonpath`
+# below puts the repo root on sys.path. Anything that installed the package and
+# then imported `src.api_backend` -- a container, a downstream consumer, the
+# documented install path -- got ModuleNotFoundError.
+#
+# `src` has no __init__.py and is imported as a namespace package, so `find`
+# needs namespaces = true to see it and its five service subpackages.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+namespaces = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"
