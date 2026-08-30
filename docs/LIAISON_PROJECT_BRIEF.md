@@ -62,7 +62,7 @@ against baselines, PHI screening, audit trail, Prometheus metrics.
 Not implemented, and the config says so rather than implying otherwise:
 OIDC, Open Policy Agent, Vault, Langfuse.
 
-The corpus is small — 48 documents, ~460 triples — which is the binding
+The corpus is small — 48 documents, 460 triples (measured 2026-08-30) — which is the binding
 constraint on whether the retrieval and embedding numbers mean much.
 Expand with `python -m src.integration --term "..." --incremental`.
 

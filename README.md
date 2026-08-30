@@ -285,21 +285,55 @@ filtered MRR and Hits@K on held-out triples, against a frequency baseline
 **A model is served only if it beats every baseline on MRR.** A link
 predictor that loses to guessing the commonest tail is complexity without
 benefit, and serving it anyway would be the random-confidence problem in a
-more convincing costume. On the 607-triple corpus indexed here:
+more convincing costume.
 
-| model | MRR | Hits@1 | Hits@10 |
-|---|---|---|---|
-| DistMult | **0.527** | 0.386 | 0.796 |
-| TransE | 0.309 | 0.159 | 0.614 |
-| frequency baseline | 0.457 | — | **0.886** |
-| Adamic-Adar | 0.035 | — | 0.000 |
+Measured 2026-08-30 on the indexed graph — **460 triples, 234 entities**,
+300 epochs at dim 64. 29 held-out triples were returned to training
+because their entities appear nowhere else and no embedding model could
+rank them, leaving **32 test triples**:
 
-TransE loses to the baseline and is refused. DistMult wins on MRR and is
-served — but it loses on Hits@10, which the report states rather than
-averages away. Adamic-Adar's number is not a verdict on its use in the
-service: there it ranks entities against entities, and this evaluation
-asks it for evidence-to-entity tail prediction, which is not what it
-measures.
+| model | MRR | Hits@1 | Hits@3 | Hits@10 | mean rank |
+|---|---|---|---|---|---|
+| DistMult | **0.553** | **0.469** | 0.563 | 0.750 | 18.9 |
+| frequency baseline | 0.510 | 0.313 | **0.594** | **0.938** | **3.8** |
+| TransE | 0.293 | 0.094 | 0.406 | 0.719 | 12.6 |
+| Adamic-Adar | 0.039 | 0.000 | 0.000 | 0.000 | 25.8 |
+
+TransE loses to the frequency baseline and is refused. DistMult beats it
+on MRR and is served — **and loses to it on Hits@3, Hits@10 and mean
+rank.** It wins the gated metric by being confidently right on a few
+triples and badly wrong on the rest, which a mean rank of 18.9 against
+the baseline's 3.8 is the clearest statement of. The gate checks MRR
+only; the report lists the rest rather than averaging them away, and
+those two facts are currently in tension. See *Known limitation* below.
+
+**These numbers cannot separate these models.** With 32 test triples one
+triple is 3.1% of the metric, and DistMult's 0.043 MRR margin over the
+baseline is worth about 1.4 of them. Treat the ordering as provisional
+until the corpus is large enough for the comparison to mean something —
+that, not the model architecture, is the thing worth changing.
+
+An earlier version of this table reported 0.527 / 0.309 / 0.457 / 0.035
+on a "607-triple corpus". Those figures came from a real run, but on a
+graph state that no longer exists and was never recorded; the 607 count
+matched no artifact in the repository. They have been replaced with
+measurements reproducible from the command above.
+
+Adamic-Adar's number is not a verdict on its use in the service: there it
+ranks entities against entities, and this evaluation asks it for
+evidence-to-entity tail prediction, which is not what it measures.
+
+#### Known limitation: the gate reads one metric
+
+`beats = all(evaluation.mrr > b.mrr for b in baselines)` (`src/kge.py`)
+decides serving on MRR alone. The report already computes
+`loses_to_a_baseline_on` for every other metric and prints it — but
+nothing acts on it, so a model can be served while losing on the majority
+of what was measured. That is the state above: DistMult is served on a
+0.043 MRR margin while ranking five times worse by mean rank.
+
+The gate was written to stop a link predictor that loses to guessing the
+commonest tail from being served. On this evaluation it does not do that.
 
 Each served suggestion carries the model's held-out MRR, and the score is
 called a score rather than a confidence, because it is not a probability.
