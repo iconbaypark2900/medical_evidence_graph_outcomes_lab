@@ -71,6 +71,23 @@ POINT_NAMESPACE = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
 # point, and are kept out of the graph, where it is noise.
 MAX_ENTITY_NODE_LENGTH = 80
 
+def read_terms_file(path: Path) -> List[str]:
+    """Search terms from a file, one per line.
+
+    Blank lines and lines starting with # are ignored, so the list can carry
+    the grouping and the reasoning that produced it. Duplicates are dropped
+    but order is kept: the watermark in .ingest_state.json is per term, and
+    ingesting the same term twice in one run would advance it twice.
+    """
+    seen, terms = set(), []
+    for line in Path(path).read_text().splitlines():
+        term = line.split("#", 1)[0].strip()
+        if term and term not in seen:
+            seen.add(term)
+            terms.append(term)
+    return terms
+
+
 # Where the incremental-ingest watermark lives.
 #
 # Without one, the only refresh available is a full re-fetch of every term
@@ -548,6 +565,9 @@ async def main(argv: Optional[List[str]] = None):
         description="Ingest medical evidence and index it into all three stores")
     parser.add_argument("--term", action="append", dest="terms",
                         help="search term (repeatable)")
+    parser.add_argument("--terms-file", type=Path, default=None,
+                        help="file of search terms, one per line; blank lines "
+                             "and lines starting with # are ignored")
     parser.add_argument("--max-per-source", type=int, default=3)
     parser.add_argument("--incremental", action="store_true",
                         help="fetch only what changed since the last run")
@@ -556,8 +576,17 @@ async def main(argv: Optional[List[str]] = None):
     parser.add_argument("--state", type=Path, default=INGEST_STATE_PATH)
     args = parser.parse_args(argv)
 
+    terms = list(args.terms or [])
+    if args.terms_file:
+        terms.extend(read_terms_file(args.terms_file))
+    if args.terms_file and not terms:
+        # An empty list would silently fall back to the single hardcoded
+        # default term, quietly ingesting something other than what was asked
+        # for. Better to say the file gave nothing.
+        parser.error(f"{args.terms_file} contains no search terms")
+
     results = await integrate_ingestion_and_storage(
-        search_terms=args.terms,
+        search_terms=terms or None,
         max_per_source=args.max_per_source,
         since=args.since,
         incremental=args.incremental,

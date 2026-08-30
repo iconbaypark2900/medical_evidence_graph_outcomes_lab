@@ -426,3 +426,44 @@ def test_clinical_trials_fetcher_inherits_the_pacing_behaviour():
     assert fetcher.max_retries == 3
     assert fetcher.rate_limiter.min_interval > 0
     assert fetcher.base_url.startswith("https://clinicaltrials.gov/")
+
+
+# ---------------------------------------------------------------------------
+# The committed term list
+#
+# The corpus README.md reports on is whatever data/ingestion_terms.txt
+# produces. If that file cannot be read back into the same terms, the
+# published evaluation is not reproducible.
+# ---------------------------------------------------------------------------
+
+def test_a_terms_file_drops_comments_blanks_and_duplicates(tmp_path):
+    from src.integration import read_terms_file
+
+    path = tmp_path / "terms.txt"
+    path.write_text(
+        "# a heading\n"
+        "\n"
+        "metformin cardiovascular outcomes\n"
+        "statin primary prevention   # trailing comment\n"
+        "metformin cardiovascular outcomes\n"
+        "   \n")
+
+    assert read_terms_file(path) == [
+        "metformin cardiovascular outcomes",
+        "statin primary prevention",
+    ]
+
+
+def test_the_committed_term_list_parses():
+    """The corpus has to be reproducible from what is in the repository."""
+    from pathlib import Path
+
+    from src.integration import read_terms_file
+
+    terms = read_terms_file(
+        Path(__file__).resolve().parent.parent / "data" / "ingestion_terms.txt")
+
+    assert len(terms) == len(set(terms)), "duplicate terms would double-advance the watermark"
+    assert len(terms) >= 100, (
+        "the published evaluation depends on a corpus this list produces; a "
+        "list this short will not produce one worth reporting")
