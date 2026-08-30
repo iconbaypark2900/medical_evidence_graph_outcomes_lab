@@ -23,6 +23,15 @@ _TEST_STATE = tempfile.mkdtemp(prefix="meg-test-state-")
 os.environ.setdefault("MEG_MODEL_STORE", os.path.join(_TEST_STATE, "models"))
 os.environ.setdefault("MEG_AUDIT_LOG", os.path.join(_TEST_STATE, "audit.jsonl"))
 
+# The suite configures no API keys, and the API now refuses rather than
+# serving unauthenticated when none are set. Opt in explicitly here so the
+# endpoint tests exercise the handlers rather than 84 identical 503s.
+#
+# This is the one place the opt-in belongs: a test that needed it silently
+# would be a test that could not tell the two auth modes apart.
+# test_api_backend.py pins the refusal itself by clearing this.
+os.environ.setdefault("MEG_ALLOW_ANONYMOUS", "1")
+
 import numpy as np
 import pandas as pd
 import pytest

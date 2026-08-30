@@ -129,10 +129,20 @@ Every analysis endpoint requires `X-API-Key`; `/`, `/health` and
 `/api/health` stay open so a load balancer can probe them. Keys come from
 `MEG_API_KEYS` (comma-separated) or `security.api_keys` in the config.
 
-With no keys configured the API still runs — you have to be able to
-develop against it — but it says so: a warning at startup, a banner in
-the frontend, and `"authentication": "disabled"` in the health payload.
-It is unauthenticated, not silently unauthenticated.
+With no keys configured the API **refuses** every analysis endpoint with a
+503 naming both ways out. Running open is still possible, but it is now a
+decision made at the point of deployment rather than the default:
+
+```bash
+MEG_ALLOW_ANONYMOUS=1 .venv/bin/python -m uvicorn src.api_backend:app --port 8000
+```
+
+It previously served every endpoint to anyone who could reach the port
+whenever the key list was empty, and the only thing between that and the
+network was `start_system.py` declining a non-loopback bind. The health
+payload now distinguishes all three states — `api_key`, `anonymous`,
+`refusing` — and running anonymously still warns at startup and shows a
+banner in the frontend. It is unauthenticated by choice, not by omission.
 
 CORS is restricted to `security.allowed_origins` (or `MEG_ALLOWED_ORIGINS`),
 defaulting to the local Streamlit frontend. It was previously `["*"]` with

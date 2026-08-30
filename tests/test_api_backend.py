@@ -918,8 +918,14 @@ def keyed_client(monkeypatch):
 
 
 def test_health_states_whether_authentication_is_on(client):
-    """An unauthenticated deployment should be visible to whoever looks."""
-    assert client.get("/api/health").json()["authentication"] == "disabled"
+    """An unauthenticated deployment should be visible to whoever looks.
+
+    "disabled" became "anonymous" when running open stopped being the default
+    and became an explicit MEG_ALLOW_ANONYMOUS opt-in: there are now three
+    states to tell apart, not two, and "disabled" did not distinguish serving
+    openly from refusing. See test_health_distinguishes_refusing_from_anonymous.
+    """
+    assert client.get("/api/health").json()["authentication"] == "anonymous"
 
 
 def test_health_states_when_authentication_is_on(keyed_client):
@@ -1082,3 +1088,72 @@ def test_health_reports_what_phi_detection_actually_does(client):
     assert described["enabled"] is True
     assert described["backend"] == "patterns"
     assert "not detected" in described["note"]
+
+
+# ---------------------------------------------------------------------------
+# Authentication posture
+#
+# conftest sets MEG_ALLOW_ANONYMOUS=1 so the rest of the suite can reach the
+# handlers. These two clear it, because the whole point of the change is that
+# the unset case behaves differently -- and a suite that only ever runs with
+# the opt-in on could not tell that the refusal exists.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def restore_auth_globals():
+    """Put API_KEYS and ALLOW_ANONYMOUS back after a lifespan has rewritten them.
+
+    Entering the TestClient context runs the lifespan, which calls configure()
+    and reassigns both module globals from the environment. monkeypatch undoes
+    the environment at teardown but cannot undo that assignment, so without
+    this the next test to use the plain `client` fixture -- which does not run
+    a lifespan -- inherits whatever the last context manager left behind.
+    """
+    saved = (backend.API_KEYS, backend.ALLOW_ANONYMOUS)
+    yield
+    backend.API_KEYS, backend.ALLOW_ANONYMOUS = saved
+
+
+def test_no_keys_and_no_opt_in_refuses_rather_than_serving_open(
+        monkeypatch, restore_auth_globals):
+    """With no keys and no explicit opt-in, an analysis endpoint refuses.
+
+    This used to return results. An empty key list meant require_api_key
+    returned None and every protected endpoint served anyone who could reach
+    the port; the only thing standing between that and the network was
+    start_system.py declining a non-loopback bind.
+
+    Patching the environment rather than the module global is deliberate:
+    entering the TestClient context runs the lifespan, which calls configure()
+    and reloads both values from the environment. A test that patched
+    backend.ALLOW_ANONYMOUS would be silently overwritten before the request.
+    """
+    monkeypatch.delenv("MEG_ALLOW_ANONYMOUS", raising=False)
+    monkeypatch.delenv("MEG_API_KEYS", raising=False)
+
+    with TestClient(app) as client:
+        response = client.post("/api/survival-analysis/kaplan-meier", json={})
+
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    # The message has to name both ways out, or it is a dead end.
+    assert "MEG_API_KEYS" in detail
+    assert "MEG_ALLOW_ANONYMOUS" in detail
+
+
+def test_health_distinguishes_refusing_from_anonymous(
+        monkeypatch, restore_auth_globals):
+    """/api/health names which of the three auth states it is in."""
+    monkeypatch.delenv("MEG_API_KEYS", raising=False)
+
+    monkeypatch.delenv("MEG_ALLOW_ANONYMOUS", raising=False)
+    with TestClient(app) as client:
+        assert client.get("/api/health").json()["authentication"] == "refusing"
+
+    monkeypatch.setenv("MEG_ALLOW_ANONYMOUS", "1")
+    with TestClient(app) as client:
+        assert client.get("/api/health").json()["authentication"] == "anonymous"
+
+    monkeypatch.setenv("MEG_API_KEYS", "a-key")
+    with TestClient(app) as client:
+        assert client.get("/api/health").json()["authentication"] == "api_key"

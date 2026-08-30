@@ -63,7 +63,8 @@
             "_not_implemented": [
                 "OIDC single sign-on: no code. The mechanism is a shared key.",
                 "Open Policy Agent: no per-role or per-dataset authorization exists. A valid key grants every endpoint."
-            ]
+            ],
+            "_no_keys_behaviour": "With api_keys empty and MEG_API_KEYS unset, every endpoint carrying require_api_key refuses with 503. Set MEG_ALLOW_ANONYMOUS=1 to serve unauthenticated on a trusted network -- environment-only and deliberately not settable here, so turning authentication off cannot be committed to this file. This previously failed open: an empty list served every endpoint to anyone who could reach the port."
         },
         "api_keys": [],
         "allowed_origins": [

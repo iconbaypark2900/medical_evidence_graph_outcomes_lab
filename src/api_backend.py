@@ -93,18 +93,26 @@ async def lifespan(app: FastAPI):
 
 def configure(config_path: str = "config/settings.json") -> Dict[str, Any]:
     """Read config and restore persisted state. Idempotent."""
-    global API_KEYS, ALLOWED_ORIGINS, phi_scanner, experiment_tracker
+    global API_KEYS, ALLOWED_ORIGINS, ALLOW_ANONYMOUS, phi_scanner, experiment_tracker
 
     API_KEYS = load_api_keys(config_path)
     ALLOWED_ORIGINS = load_allowed_origins(config_path)
+    ALLOW_ANONYMOUS = load_allow_anonymous()
     phi_scanner = load_phi_scanner(config_path)
     experiment_tracker = load_tracker(config_path)
 
-    if not API_KEYS:
+    if not API_KEYS and ALLOW_ANONYMOUS:
         logger.warning(
-            "No API keys configured: every endpoint is open to anyone who can "
-            "reach this port. Set MEG_API_KEYS or security.api_keys before "
-            "exposing this beyond localhost.")
+            "No API keys configured and MEG_ALLOW_ANONYMOUS is set: every "
+            "endpoint is open to anyone who can reach this port. Set "
+            "MEG_API_KEYS or security.api_keys before exposing this beyond "
+            "localhost.")
+    elif not API_KEYS:
+        logger.warning(
+            "No API keys configured: every analysis endpoint will refuse with "
+            "503. Set MEG_API_KEYS or security.api_keys, or set "
+            "MEG_ALLOW_ANONYMOUS=1 to run without authentication on a trusted "
+            "network.")
     logger.info(
         f"PHI detection: {phi_scanner.backend}, on detection "
         f"{phi_scanner.on_detection}" if phi_scanner.enabled
@@ -154,6 +162,20 @@ def load_api_keys(config_path: str = "config/settings.json") -> set:
     return {k for k in config.get("security", {}).get("api_keys", []) if k}
 
 
+def load_allow_anonymous() -> bool:
+    """Whether to serve unauthenticated when no API keys are configured.
+
+    Environment-only and opt-in, deliberately not readable from the config
+    file: switching authentication off should be a decision made at the point
+    of deployment, not a line that can be committed and then forgotten. The
+    previous behaviour was the opposite -- an empty key list silently opened
+    every endpoint, and the only thing standing between that and the network
+    was start_system.py refusing a non-loopback bind.
+    """
+    return os.environ.get("MEG_ALLOW_ANONYMOUS", "").strip().lower() in {
+        "1", "true", "yes", "on"}
+
+
 def load_allowed_origins(config_path: str = "config/settings.json") -> List[str]:
     from_env = os.environ.get("MEG_ALLOWED_ORIGINS", "")
     origins = [o.strip() for o in from_env.split(",") if o.strip()]
@@ -184,6 +206,7 @@ def load_allowed_origins(config_path: str = "config/settings.json") -> List[str]
 # What it was is state nobody asked for.
 API_KEYS: set = set()
 ALLOWED_ORIGINS: List[str] = load_allowed_origins()
+ALLOW_ANONYMOUS: bool = load_allow_anonymous()
 
 
 def load_phi_scanner(config_path: str = "config/settings.json"):
@@ -228,7 +251,19 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 async def require_api_key(api_key: str = Security(api_key_header)) -> Optional[str]:
     """Reject a request that carries no valid key, when keys are configured."""
     if not API_KEYS:
-        return None
+        if ALLOW_ANONYMOUS:
+            return None
+        # 503 rather than 401: the caller cannot fix this by supplying a
+        # key, because no key would be valid. The fault is the deployment's.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "This API has no keys configured, so it cannot authenticate "
+                "anyone. Set MEG_API_KEYS (or security.api_keys), or set "
+                "MEG_ALLOW_ANONYMOUS=1 to run without authentication on a "
+                "trusted network."
+            ),
+        )
 
     # Constant-time comparison against each key: a plain `in` on a set
     # leaks nothing useful here, but comparing the supplied value is where
@@ -953,7 +988,10 @@ async def health_check():
         "guidelines_registered": len(pathway_service.guidelines),
         # Stated, not assumed. An unauthenticated deployment should be
         # visible to whoever is looking at it.
-        "authentication": "api_key" if API_KEYS else "disabled",
+        "authentication": (
+            "api_key" if API_KEYS
+            else "anonymous" if ALLOW_ANONYMOUS
+            else "refusing"),
         # What is actually done, not what a config flag asserts.
         "phi_detection": phi_scanner.describe,
         "experiment_tracking": experiment_tracker.describe,
