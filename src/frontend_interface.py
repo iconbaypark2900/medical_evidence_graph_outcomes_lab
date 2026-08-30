@@ -325,10 +325,21 @@ def page_dashboard():
     col2.metric("Causal inference", "ready" if ready["causal_inference"] else "not ready")
     col3.metric("Risk assessment", "ready" if ready["risk_assessment"] else "not trained")
 
-    if health.get("authentication") == "disabled":
+    # Three states, not two. "disabled" was the old name for having no keys
+    # configured, back when that meant the API served everyone; it now
+    # distinguishes serving open from refusing, and this banner said nothing
+    # at all for a while after that split because it still tested the old name.
+    authentication = health.get("authentication")
+    if authentication == "anonymous":
         st.warning(
             "This API has no authentication configured. Anyone who can reach "
             "its port can run analyses and read the corpus."
+        )
+    elif authentication == "refusing":
+        st.error(
+            "This API has no keys configured and is refusing every analysis "
+            "endpoint. Set MEG_API_KEYS on the server, or MEG_ALLOW_ANONYMOUS=1 "
+            "to run it open on a trusted network."
         )
 
     if health["risk_model_version"]:
